@@ -89,6 +89,34 @@ impl<E: Pairing> Srs<E> {
         debug_assert!(rem == value);
         (value, Proof(self.commit(&q).0))
     }
+
+    /// Open several polynomials at the same point with one proof.
+    ///
+    /// The verifier supplies a random `gamma`; the polynomials are folded into
+    /// `sum_i gamma^i p_i` and that is opened once. Returns each `p_i(z)` and
+    /// the proof for the folded polynomial.
+    pub fn open_batch(
+        &self,
+        polys: &[&DensePolynomial<E::ScalarField>],
+        z: E::ScalarField,
+        gamma: E::ScalarField,
+    ) -> (Vec<E::ScalarField>, Proof<E>) {
+        let values: Vec<_> = polys.iter().map(|p| p.evaluate(&z)).collect();
+        let folded = fold(polys, gamma);
+        let (q, _) = divide_by_linear(&folded, z);
+        (values, Proof(self.commit(&q).0))
+    }
+}
+
+/// `sum_i gamma^i p_i`
+pub fn fold<F: Field>(polys: &[&DensePolynomial<F>], gamma: F) -> DensePolynomial<F> {
+    let mut acc = DensePolynomial::zero();
+    let mut coeff = F::one();
+    for p in polys {
+        acc += (coeff, *p);
+        coeff *= gamma;
+    }
+    acc
 }
 
 impl<E: Pairing> VerifierKey<E> {
@@ -104,6 +132,28 @@ impl<E: Pairing> VerifierKey<E> {
         let lhs = comm.0.into_group() - self.g * value + proof.0 * z;
         let rhs = -proof.0.into_group();
         E::multi_pairing([lhs, rhs], [self.h, self.tau_h]).0.is_one()
+    }
+
+    /// Counterpart of [`Srs::open_batch`]: fold commitments and values with
+    /// the same `gamma` and check the single proof.
+    pub fn verify_batch(
+        &self,
+        comms: &[Commitment<E>],
+        z: E::ScalarField,
+        values: &[E::ScalarField],
+        gamma: E::ScalarField,
+        proof: &Proof<E>,
+    ) -> bool {
+        assert_eq!(comms.len(), values.len());
+        let mut folded_comm = E::G1::zero();
+        let mut folded_value = E::ScalarField::zero();
+        let mut coeff = E::ScalarField::one();
+        for (c, v) in comms.iter().zip(values) {
+            folded_comm += c.0 * coeff;
+            folded_value += *v * coeff;
+            coeff *= gamma;
+        }
+        self.verify(&Commitment(folded_comm.into_affine()), z, folded_value, proof)
     }
 }
 
@@ -164,6 +214,32 @@ mod tests {
         // wrong commitment
         let c2 = srs.commit(&DensePolynomial::rand(20, &mut rng));
         assert!(!vk.verify(&c2, z, v, &proof));
+    }
+
+    #[test]
+    fn batch_open() {
+        let mut rng = test_rng();
+        let srs = Srs::<Bls12_381>::setup(32, &mut rng);
+        let vk = srs.verifier_key();
+
+        let polys: Vec<DensePolynomial<Fr>> = (0..4)
+            .map(|i| DensePolynomial::rand(10 + i, &mut rng))
+            .collect();
+        let refs: Vec<&DensePolynomial<Fr>> = polys.iter().collect();
+        let comms: Vec<_> = polys.iter().map(|p| srs.commit(p)).collect();
+
+        let z = Fr::rand(&mut rng);
+        let gamma = Fr::rand(&mut rng);
+        let (values, proof) = srs.open_batch(&refs, z, gamma);
+        for (p, v) in polys.iter().zip(&values) {
+            assert_eq!(p.evaluate(&z), *v);
+        }
+        assert!(vk.verify_batch(&comms, z, &values, gamma, &proof));
+
+        let mut bad = values.clone();
+        bad[2] += Fr::one();
+        assert!(!vk.verify_batch(&comms, z, &bad, gamma, &proof));
+        assert!(!vk.verify_batch(&comms, z, &values, gamma + Fr::one(), &proof));
     }
 
     #[test]
