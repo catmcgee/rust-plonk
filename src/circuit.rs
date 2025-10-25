@@ -7,6 +7,10 @@
 //! Every gate has three wire slots (`a`, `b`, `c`) which each point at a
 //! variable. Two slots pointing at the same variable is a copy constraint,
 //! enforced later by the permutation argument.
+//!
+//! Public inputs are the first `l` rows: each is a gate `1 * a + PI_i = 0`
+//! where `PI_i = -x_i` lives in the public input polynomial rather than in
+//! `q_C`, so the verifier can supply it.
 
 use ark_ff::Field;
 
@@ -27,9 +31,11 @@ pub struct Gate<F: Field> {
 
 #[derive(Clone, Debug)]
 pub struct Circuit<F: Field> {
+    /// Public input gates first, then everything else.
     gates: Vec<Gate<F>>,
     /// Witness assignment, indexed by `Variable`.
     values: Vec<F>,
+    public_inputs: Vec<Variable>,
 }
 
 impl<F: Field> Circuit<F> {
@@ -39,6 +45,7 @@ impl<F: Field> Circuit<F> {
         let mut c = Circuit {
             gates: Vec::new(),
             values: vec![F::zero()],
+            public_inputs: Vec::new(),
         };
         // 1 * zero + 0 = 0
         c.gate(Self::ZERO, Self::ZERO, Self::ZERO, F::one(), F::zero(), F::zero(), F::zero(), F::zero());
@@ -59,6 +66,15 @@ impl<F: Field> Circuit<F> {
         &self.gates
     }
 
+    pub fn num_public_inputs(&self) -> usize {
+        self.public_inputs.len()
+    }
+
+    /// Public input values, in the order they were declared.
+    pub fn public_inputs(&self) -> Vec<F> {
+        self.public_inputs.iter().map(|v| self.value(*v)).collect()
+    }
+
     pub fn value(&self, v: Variable) -> F {
         self.values[v.0]
     }
@@ -75,6 +91,28 @@ impl<F: Field> Circuit<F> {
             assert!(v.0 < self.values.len(), "unknown variable {:?}", v);
         }
         self.gates.push(Gate { a, b, c, q_l, q_r, q_o, q_m, q_c });
+    }
+
+    /// Declare a public input. Its gate is placed before all other gates so
+    /// row `i` of the trace corresponds to public input `i`.
+    pub fn public_input(&mut self, value: F) -> Variable {
+        let v = self.alloc(value);
+        let row = self.public_inputs.len();
+        self.gates.insert(
+            row,
+            Gate {
+                a: v,
+                b: Self::ZERO,
+                c: Self::ZERO,
+                q_l: F::one(),
+                q_r: F::zero(),
+                q_o: F::zero(),
+                q_m: F::zero(),
+                q_c: F::zero(),
+            },
+        );
+        self.public_inputs.push(v);
+        v
     }
 
     /// A variable fixed to `k`.
@@ -107,9 +145,11 @@ impl<F: Field> Circuit<F> {
     /// Check every gate against the current assignment. Useful in tests; the
     /// prover doesn't rely on it.
     pub fn is_satisfied(&self) -> bool {
-        self.gates.iter().all(|g| {
+        let pi = self.public_inputs();
+        self.gates.iter().enumerate().all(|(i, g)| {
             let (a, b, c) = (self.value(g.a), self.value(g.b), self.value(g.c));
-            (g.q_l * a + g.q_r * b + g.q_o * c + g.q_m * a * b + g.q_c).is_zero()
+            let pi_i = pi.get(i).map_or(F::zero(), |x| -*x);
+            (g.q_l * a + g.q_r * b + g.q_o * c + g.q_m * a * b + g.q_c + pi_i).is_zero()
         })
     }
 }
@@ -136,6 +176,22 @@ mod tests {
         c.assert_equal(s, fifteen);
         assert!(c.is_satisfied());
         assert_eq!(c.value(s), Fr::from(15u64));
+    }
+
+    #[test]
+    fn public_inputs_come_first() {
+        let mut c = Circuit::<Fr>::new();
+        let x = c.alloc(Fr::from(3u64));
+        let y = c.public_input(Fr::from(4u64));
+        let xy = c.mul(x, y);
+        let out = c.public_input(Fr::from(12u64));
+        c.assert_equal(xy, out);
+        assert!(c.is_satisfied());
+        assert_eq!(c.num_public_inputs(), 2);
+        assert_eq!(c.public_inputs(), vec![Fr::from(4u64), Fr::from(12u64)]);
+        assert_eq!(c.gates()[0].a, y);
+        assert_eq!(c.gates()[1].a, out);
+        assert_eq!(c.gates()[2].a, Circuit::<Fr>::ZERO);
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub struct VerifierKey<E: Pairing> {
     pub q_m: Commitment<E>,
     pub q_c: Commitment<E>,
     pub s_sigma: [Commitment<E>; 3],
+    pub num_public_inputs: usize,
     pub kzg: kzg::VerifierKey<E>,
 }
 
@@ -83,6 +84,7 @@ pub fn preprocess<E: Pairing>(circuit: &Circuit<E::ScalarField>, srs: &Srs<E>) -
         q_m: srs.commit(&q_m),
         q_c: srs.commit(&q_c),
         s_sigma: [srs.commit(&s_sigma[0]), srs.commit(&s_sigma[1]), srs.commit(&s_sigma[2])],
+        num_public_inputs: circuit.num_public_inputs(),
         kzg: srs.verifier_key(),
     };
 
