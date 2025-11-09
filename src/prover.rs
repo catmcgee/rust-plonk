@@ -6,9 +6,9 @@
 use crate::circuit::Circuit;
 use crate::preprocess::ProverKey;
 use ark_ec::pairing::Pairing;
-use ark_ff::{FftField, Field, One};
+use ark_ff::{FftField, Field, One, Zero};
 use ark_poly::{
-    univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain,
+    univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, Polynomial,
     Radix2EvaluationDomain,
 };
 
@@ -112,6 +112,66 @@ pub fn accumulator<E: Pairing>(
     interpolate(&pk.domain, &evals)
 }
 
+/// Round 3: the quotient `t(X)`, split into three pieces of degree < n.
+///
+/// ```text
+/// t * Z_H = gate(X) + PI(X)
+///         + alpha   * (f(X) z(X) - g(X) z(X omega))
+///         + alpha^2 * (z(X) - 1) L_1(X)
+/// ```
+pub fn quotient<E: Pairing>(
+    pk: &ProverKey<E>,
+    wires: &[DensePolynomial<E::ScalarField>; 3],
+    z: &DensePolynomial<E::ScalarField>,
+    pi: &DensePolynomial<E::ScalarField>,
+    beta: E::ScalarField,
+    gamma: E::ScalarField,
+    alpha: E::ScalarField,
+) -> [DensePolynomial<E::ScalarField>; 3] {
+    type P<E> = DensePolynomial<<E as Pairing>::ScalarField>;
+    let n = pk.domain.size();
+    let [a, b, c] = wires;
+    // wire(X) + beta * k * X + gamma
+    let lin = |k: E::ScalarField, wire: &P<E>| -> P<E> {
+        wire + &DensePolynomial::from_coefficients_vec(vec![gamma, beta * k])
+    };
+    // wire(X) + beta * s(X) + gamma
+    let lin_sigma = |s: &P<E>, wire: &P<E>| -> P<E> {
+        &(wire + &(s * beta)) + &DensePolynomial::from_coefficients_vec(vec![gamma])
+    };
+
+    let gate = &(&(a * b) * &pk.q_m)
+        + &(a * &pk.q_l)
+        + (b * &pk.q_r)
+        + (c * &pk.q_o)
+        + pk.q_c.clone()
+        + pi.clone();
+
+    let f = &(&lin(E::ScalarField::one(), a) * &lin(pk.k1, b)) * &lin(pk.k2, c);
+    let g = &(&lin_sigma(&pk.s_sigma[0], a) * &lin_sigma(&pk.s_sigma[1], b)) * &lin_sigma(&pk.s_sigma[2], c);
+    let z_w = shift(&pk.domain, z);
+    let perm = &(&f * z) - &(&g * &z_w);
+
+    let l1 = lagrange_first(&pk.domain);
+    let z_minus_one = z - &DensePolynomial::from_coefficients_vec(vec![E::ScalarField::one()]);
+    let start = &z_minus_one * &l1;
+
+    let numerator = &(&gate + &(&perm * alpha)) + &(&start * (alpha * alpha));
+    let (t, rem) = numerator.divide_by_vanishing_poly(pk.domain);
+    assert!(rem.is_zero(), "constraints not satisfied: quotient has a remainder");
+    assert!(t.degree() < 3 * n, "quotient degree {} too large", t.degree());
+
+    let mut coeffs = t.coeffs;
+    coeffs.resize(3 * n, E::ScalarField::zero());
+    let hi = coeffs.split_off(2 * n);
+    let mid = coeffs.split_off(n);
+    [
+        DensePolynomial::from_coefficients_vec(coeffs),
+        DensePolynomial::from_coefficients_vec(mid),
+        DensePolynomial::from_coefficients_vec(hi),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,7 +179,6 @@ mod tests {
     use crate::preprocess::preprocess;
     use ark_bls12_381::{Bls12_381, Fr};
     use ark_ff::UniformRand;
-    use ark_poly::Polynomial;
     use ark_std::test_rng;
 
     fn circuit() -> Circuit<Fr> {
@@ -167,5 +226,62 @@ mod tests {
         let p = DensePolynomial::<Fr>::rand(20, &mut rng);
         let x = Fr::rand(&mut rng);
         assert_eq!(shift(&domain, &p).evaluate(&x), p.evaluate(&(x * domain.group_gen())));
+    }
+
+    #[test]
+    fn quotient_divides_exactly() {
+        let mut rng = test_rng();
+        let srs = Srs::<Bls12_381>::setup(32, &mut rng);
+        let c = circuit();
+        let pk = preprocess(&c, &srs);
+        let n = pk.domain.size();
+        let w = Witness::from_circuit(&c, n);
+        let (beta, gamma, alpha) = (Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng));
+        let wires = wire_polys(&pk, &w);
+        let z = accumulator(&pk, &w, beta, gamma);
+        let pi = public_input_poly(&pk.domain, &c.public_inputs());
+        let [t_lo, t_mid, t_hi] = quotient(&pk, &wires, &z, &pi, beta, gamma, alpha);
+        assert!(t_lo.degree() < n && t_mid.degree() < n && t_hi.degree() < n);
+
+        // reassemble and spot-check the identity at a random point
+        let zeta = Fr::rand(&mut rng);
+        let zn = zeta.pow([n as u64]);
+        let t = t_lo.evaluate(&zeta) + zn * t_mid.evaluate(&zeta) + zn * zn * t_hi.evaluate(&zeta);
+        let zh = pk.domain.evaluate_vanishing_polynomial(zeta);
+        let [a, b, c] = wires.map(|p| p.evaluate(&zeta));
+        let [s1, s2, s3] = [0, 1, 2].map(|i| pk.s_sigma[i].evaluate(&zeta));
+        let gate = a * b * pk.q_m.evaluate(&zeta)
+            + a * pk.q_l.evaluate(&zeta)
+            + b * pk.q_r.evaluate(&zeta)
+            + c * pk.q_o.evaluate(&zeta)
+            + pk.q_c.evaluate(&zeta)
+            + pi.evaluate(&zeta);
+        let f = (a + beta * zeta + gamma) * (b + beta * pk.k1 * zeta + gamma) * (c + beta * pk.k2 * zeta + gamma);
+        let g = (a + beta * s1 + gamma) * (b + beta * s2 + gamma) * (c + beta * s3 + gamma);
+        let zz = z.evaluate(&zeta);
+        let zw = z.evaluate(&(zeta * pk.domain.group_gen()));
+        let l1 = lagrange_first(&pk.domain).evaluate(&zeta);
+        let lhs = gate + alpha * (f * zz - g * zw) + alpha * alpha * (zz - Fr::one()) * l1;
+        assert_eq!(lhs, t * zh);
+    }
+
+    #[test]
+    #[should_panic(expected = "remainder")]
+    fn bad_witness_has_remainder() {
+        let mut rng = test_rng();
+        let srs = Srs::<Bls12_381>::setup(32, &mut rng);
+        let mut c = Circuit::<Fr>::new();
+        let x = c.alloc(Fr::from(3u64));
+        let y = c.alloc(Fr::from(4u64));
+        let xy = c.mul(x, y);
+        let k = c.constant(Fr::from(13u64));
+        c.assert_equal(xy, k);
+        let pk = preprocess(&c, &srs);
+        let w = Witness::from_circuit(&c, pk.domain.size());
+        let (beta, gamma, alpha) = (Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng));
+        let wires = wire_polys(&pk, &w);
+        let z = accumulator(&pk, &w, beta, gamma);
+        let pi = public_input_poly(&pk.domain, &[]);
+        quotient(&pk, &wires, &z, &pi, beta, gamma, alpha);
     }
 }
