@@ -4,7 +4,10 @@
 //! fine while getting the arithmetic right.
 
 use crate::circuit::Circuit;
+use crate::kzg::Srs;
 use crate::preprocess::ProverKey;
+use crate::proof::{Evaluations, Proof};
+use crate::transcript::Transcript;
 use ark_ec::pairing::Pairing;
 use ark_ff::{FftField, Field, One, Zero};
 use ark_poly::{
@@ -170,6 +173,90 @@ pub fn quotient<E: Pairing>(
         DensePolynomial::from_coefficients_vec(mid),
         DensePolynomial::from_coefficients_vec(hi),
     ]
+}
+
+/// Run all five rounds and produce a proof.
+pub fn prove<E: Pairing>(srs: &Srs<E>, pk: &ProverKey<E>, circuit: &Circuit<E::ScalarField>) -> Proof<E> {
+    let n = pk.domain.size();
+    let omega = pk.domain.group_gen();
+    assert_eq!(circuit.num_public_inputs(), pk.vk.num_public_inputs);
+    let public_inputs = circuit.public_inputs();
+
+    let mut transcript = Transcript::new(b"plonk");
+    transcript.absorb(b"n", &(n as u64));
+    transcript.absorb(b"public inputs", &public_inputs);
+
+    // round 1
+    let w = Witness::from_circuit(circuit, n);
+    let wires = wire_polys(pk, &w);
+    let [ca, cb, cc] = [0, 1, 2].map(|i| srs.commit(&wires[i]));
+    transcript.absorb(b"a", &ca.0);
+    transcript.absorb(b"b", &cb.0);
+    transcript.absorb(b"c", &cc.0);
+
+    // round 2
+    let beta = transcript.challenge(b"beta");
+    let gamma = transcript.challenge(b"gamma");
+    let z = accumulator(pk, &w, beta, gamma);
+    let cz = srs.commit(&z);
+    transcript.absorb(b"z", &cz.0);
+
+    // round 3
+    let alpha = transcript.challenge(b"alpha");
+    let pi = public_input_poly(&pk.domain, &public_inputs);
+    let [t_lo, t_mid, t_hi] = quotient(pk, &wires, &z, &pi, beta, gamma, alpha);
+    let [ct_lo, ct_mid, ct_hi] = [&t_lo, &t_mid, &t_hi].map(|t| srs.commit(t));
+    transcript.absorb(b"t_lo", &ct_lo.0);
+    transcript.absorb(b"t_mid", &ct_mid.0);
+    transcript.absorb(b"t_hi", &ct_hi.0);
+
+    // round 4
+    let zeta: E::ScalarField = transcript.challenge(b"zeta");
+    let [a, b, c] = &wires;
+    let at_zeta = [
+        a, b, c, &z, &t_lo, &t_mid, &t_hi,
+        &pk.q_l, &pk.q_r, &pk.q_o, &pk.q_m, &pk.q_c,
+        &pk.s_sigma[0], &pk.s_sigma[1], &pk.s_sigma[2],
+    ];
+    let e: Vec<E::ScalarField> = at_zeta.iter().map(|p| p.evaluate(&zeta)).collect();
+    let evals = Evaluations {
+        a: e[0],
+        b: e[1],
+        c: e[2],
+        z: e[3],
+        t_lo: e[4],
+        t_mid: e[5],
+        t_hi: e[6],
+        q_l: e[7],
+        q_r: e[8],
+        q_o: e[9],
+        q_m: e[10],
+        q_c: e[11],
+        s_sigma: [e[12], e[13], e[14]],
+        z_omega: z.evaluate(&(zeta * omega)),
+    };
+    for v in &e {
+        transcript.absorb(b"eval", v);
+    }
+    transcript.absorb(b"eval", &evals.z_omega);
+
+    // round 5
+    let v = transcript.challenge(b"v");
+    let (_, w_zeta) = srs.open_batch(&at_zeta, zeta, v);
+    let (_, w_zeta_omega) = srs.open(&z, zeta * omega);
+
+    Proof {
+        a: ca,
+        b: cb,
+        c: cc,
+        z: cz,
+        t_lo: ct_lo,
+        t_mid: ct_mid,
+        t_hi: ct_hi,
+        evals,
+        w_zeta,
+        w_zeta_omega,
+    }
 }
 
 #[cfg(test)]
