@@ -122,6 +122,10 @@ pub fn accumulator<E: Pairing>(
 ///         + alpha   * (f(X) z(X) - g(X) z(X omega))
 ///         + alpha^2 * (z(X) - 1) L_1(X)
 /// ```
+///
+/// Everything is evaluated on a coset of a domain of size 4n, multiplied
+/// pointwise and divided by `Z_H` there (which never vanishes off `H`), then
+/// interpolated back. `t` has degree < 3n so 4n points pin it down.
 pub fn quotient<E: Pairing>(
     pk: &ProverKey<E>,
     wires: &[DensePolynomial<E::ScalarField>; 3],
@@ -131,41 +135,44 @@ pub fn quotient<E: Pairing>(
     gamma: E::ScalarField,
     alpha: E::ScalarField,
 ) -> [DensePolynomial<E::ScalarField>; 3] {
-    type P<E> = DensePolynomial<<E as Pairing>::ScalarField>;
     let n = pk.domain.size();
-    let [a, b, c] = wires;
-    // wire(X) + beta * k * X + gamma
-    let lin = |k: E::ScalarField, wire: &P<E>| -> P<E> {
-        wire + &DensePolynomial::from_coefficients_vec(vec![gamma, beta * k])
-    };
-    // wire(X) + beta * s(X) + gamma
-    let lin_sigma = |s: &P<E>, wire: &P<E>| -> P<E> {
-        &(wire + &(s * beta)) + &DensePolynomial::from_coefficients_vec(vec![gamma])
-    };
+    let coset = Radix2EvaluationDomain::<E::ScalarField>::new(4 * n)
+        .expect("no domain of size 4n")
+        .get_coset(E::ScalarField::GENERATOR)
+        .expect("generator is not in the domain");
+    let m = coset.size();
+    let ev = |p: &DensePolynomial<E::ScalarField>| coset.fft(&p.coeffs);
 
-    let gate = &(&(a * b) * &pk.q_m)
-        + &(a * &pk.q_l)
-        + (b * &pk.q_r)
-        + (c * &pk.q_o)
-        + pk.q_c.clone()
-        + pi.clone();
+    let [a, b, c] = [ev(&wires[0]), ev(&wires[1]), ev(&wires[2])];
+    let [q_l, q_r, q_o, q_m, q_c] = [ev(&pk.q_l), ev(&pk.q_r), ev(&pk.q_o), ev(&pk.q_m), ev(&pk.q_c)];
+    let [s1, s2, s3] = [ev(&pk.s_sigma[0]), ev(&pk.s_sigma[1]), ev(&pk.s_sigma[2])];
+    let pi = ev(pi);
+    let l1 = ev(&lagrange_first(&pk.domain));
+    let zz = ev(z);
+    let xs: Vec<E::ScalarField> = coset.elements().collect();
 
-    let f = &(&lin(E::ScalarField::one(), a) * &lin(pk.k1, b)) * &lin(pk.k2, c);
-    let g = &(&lin_sigma(&pk.s_sigma[0], a) * &lin_sigma(&pk.s_sigma[1], b)) * &lin_sigma(&pk.s_sigma[2], c);
-    let z_w = shift(&pk.domain, z);
-    let perm = &(&f * z) - &(&g * &z_w);
+    // The 4n-th root of unity to the 4th is omega, so z(X omega) on the
+    // coset is z(X) rotated by four positions.
+    let z_w = |i: usize| zz[(i + 4) % m];
 
-    let l1 = lagrange_first(&pk.domain);
-    let z_minus_one = z - &DensePolynomial::from_coefficients_vec(vec![E::ScalarField::one()]);
-    let start = &z_minus_one * &l1;
+    let one = E::ScalarField::one();
+    let alpha2 = alpha * alpha;
+    let mut t = Vec::with_capacity(m);
+    for i in 0..m {
+        let x = xs[i];
+        let gate = a[i] * b[i] * q_m[i] + a[i] * q_l[i] + b[i] * q_r[i] + c[i] * q_o[i] + q_c[i] + pi[i];
+        let f = (a[i] + beta * x + gamma) * (b[i] + beta * pk.k1 * x + gamma) * (c[i] + beta * pk.k2 * x + gamma);
+        let g = (a[i] + beta * s1[i] + gamma) * (b[i] + beta * s2[i] + gamma) * (c[i] + beta * s3[i] + gamma);
+        let perm = f * zz[i] - g * z_w(i);
+        let start = (zz[i] - one) * l1[i];
+        let z_h = pk.domain.evaluate_vanishing_polynomial(x);
+        t.push((gate + alpha * perm + alpha2 * start) / z_h);
+    }
+    let mut coeffs = coset.ifft(&t);
+    // Anything above 3n-1 must be zero if the constraints hold.
+    let tail = coeffs.split_off(3 * n);
+    assert!(tail.iter().all(|c| c.is_zero()), "constraints not satisfied: quotient has a remainder");
 
-    let numerator = &(&gate + &(&perm * alpha)) + &(&start * (alpha * alpha));
-    let (t, rem) = numerator.divide_by_vanishing_poly(pk.domain);
-    assert!(rem.is_zero(), "constraints not satisfied: quotient has a remainder");
-    assert!(t.degree() < 3 * n, "quotient degree {} too large", t.degree());
-
-    let mut coeffs = t.coeffs;
-    coeffs.resize(3 * n, E::ScalarField::zero());
     let hi = coeffs.split_off(2 * n);
     let mid = coeffs.split_off(n);
     [
