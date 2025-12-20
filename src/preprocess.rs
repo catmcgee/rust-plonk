@@ -36,16 +36,21 @@ pub struct VerifierKey<E: Pairing> {
     pub kzg: kzg::VerifierKey<E>,
 }
 
+/// Smallest domain we'll use. The blinded quotient has degree 3n+5 and is
+/// recovered from 4n coset evaluations, which needs n >= 8.
+pub const MIN_DOMAIN_SIZE: usize = 8;
+
 /// Domain size for a circuit: gates padded to a power of two.
 pub fn domain_size(num_gates: usize) -> usize {
-    num_gates.next_power_of_two()
+    num_gates.next_power_of_two().max(MIN_DOMAIN_SIZE)
 }
 
 pub fn preprocess<E: Pairing>(circuit: &Circuit<E::ScalarField>, srs: &Srs<E>) -> ProverKey<E> {
     let n = domain_size(circuit.num_gates());
     let domain = Radix2EvaluationDomain::<E::ScalarField>::new(n)
         .expect("field has no subgroup of that size");
-    assert!(srs.max_degree() >= n - 1, "srs too small for {} gates", n);
+    // the blinded quotient's last chunk has degree n+5
+    assert!(srs.max_degree() >= n + 5, "srs too small for {} gates", n);
 
     let (k1, k2) = coset_generators(&domain);
 

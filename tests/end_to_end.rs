@@ -23,7 +23,7 @@ fn cubic_proves_and_verifies() {
     let circuit = cubic(3, 35);
     assert!(circuit.is_satisfied());
     let pk = preprocess(&circuit, &srs);
-    let proof = prove(&srs, &pk, &circuit);
+    let proof = prove(&srs, &pk, &circuit, &mut rng);
     assert!(verify(&pk.vk, &circuit.public_inputs(), &proof));
 }
 
@@ -33,7 +33,7 @@ fn wrong_public_input_rejected() {
     let srs = Srs::<Bls12_381>::setup(64, &mut rng);
     let circuit = cubic(3, 35);
     let pk = preprocess(&circuit, &srs);
-    let proof = prove(&srs, &pk, &circuit);
+    let proof = prove(&srs, &pk, &circuit, &mut rng);
     assert!(!verify(&pk.vk, &[Fr::from(36u64)], &proof));
     assert!(!verify(&pk.vk, &[], &proof));
 }
@@ -46,7 +46,7 @@ fn unsatisfied_circuit_cannot_prove() {
     let circuit = cubic(3, 36);
     assert!(!circuit.is_satisfied());
     let pk = preprocess(&circuit, &srs);
-    let _ = prove(&srs, &pk, &circuit);
+    let _ = prove(&srs, &pk, &circuit, &mut rng);
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn tampered_proof_rejected() {
     let srs = Srs::<Bls12_381>::setup(64, &mut rng);
     let circuit = cubic(3, 35);
     let pk = preprocess(&circuit, &srs);
-    let proof = prove(&srs, &pk, &circuit);
+    let proof = prove(&srs, &pk, &circuit, &mut rng);
     let pi = circuit.public_inputs();
 
     let mut p = proof.clone();
@@ -86,7 +86,7 @@ fn proof_for_one_circuit_does_not_verify_for_another() {
     let srs = Srs::<Bls12_381>::setup(64, &mut rng);
     let circuit = cubic(3, 35);
     let pk = preprocess(&circuit, &srs);
-    let proof = prove(&srs, &pk, &circuit);
+    let proof = prove(&srs, &pk, &circuit, &mut rng);
 
     // same shape, different constant
     let mut other = Circuit::<Fr>::new();
@@ -105,7 +105,7 @@ fn proof_for_one_circuit_does_not_verify_for_another() {
 #[test]
 fn a_few_hundred_gates() {
     let mut rng = test_rng();
-    let srs = Srs::<Bls12_381>::setup(1024, &mut rng);
+    let srs = Srs::<Bls12_381>::setup(1024 + 5, &mut rng);
     // fibonacci-ish chain with a public output
     let mut c = Circuit::<Fr>::new();
     let mut a = c.constant(Fr::from(1u64));
@@ -121,7 +121,7 @@ fn a_few_hundred_gates() {
     assert!(c.is_satisfied());
     let pk = preprocess(&c, &srs);
     assert_eq!(pk.vk.n, 1024);
-    let proof = prove(&srs, &pk, &c);
+    let proof = prove(&srs, &pk, &c, &mut rng);
     assert!(verify(&pk.vk, &c.public_inputs(), &proof));
     assert!(!verify(&pk.vk, &[Fr::from(1u64)], &proof));
 }

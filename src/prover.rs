@@ -1,7 +1,4 @@
 //! The prover, following section 8 of the paper.
-//!
-//! No blinding yet, so proofs leak information about the witness. That's
-//! fine while getting the arithmetic right.
 
 use crate::circuit::Circuit;
 use crate::kzg::Srs;
@@ -14,6 +11,7 @@ use ark_poly::{
     univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, Polynomial,
     Radix2EvaluationDomain,
 };
+use ark_std::rand::RngCore;
 
 /// Wire values laid out column by column, padded to the domain size.
 pub struct Witness<F> {
@@ -75,13 +73,26 @@ pub fn public_input_poly<F: FftField>(domain: &Radix2EvaluationDomain<F>, inputs
     interpolate(domain, &evals)
 }
 
-/// Round 1: wire polynomials.
-pub fn wire_polys<E: Pairing>(pk: &ProverKey<E>, w: &Witness<E::ScalarField>) -> [DensePolynomial<E::ScalarField>; 3] {
-    [
-        interpolate(&pk.domain, &w.a),
-        interpolate(&pk.domain, &w.b),
-        interpolate(&pk.domain, &w.c),
-    ]
+/// Add `(b_k X^k + ... + b_0) * Z_H(X)` with random `b_i`. Leaves the values
+/// on the domain alone but hides the polynomial at the opening point.
+pub fn blind<F: FftField, R: RngCore>(
+    domain: &Radix2EvaluationDomain<F>,
+    p: DensePolynomial<F>,
+    degree: usize,
+    rng: &mut R,
+) -> DensePolynomial<F> {
+    let mask = DensePolynomial::from_coefficients_vec((0..=degree).map(|_| F::rand(rng)).collect());
+    p + mask.mul_by_vanishing_poly(*domain)
+}
+
+/// Round 1: wire polynomials, each blinded with a degree-1 mask because they
+/// are opened at one point. Degree n+1.
+pub fn wire_polys<E: Pairing, R: RngCore>(
+    pk: &ProverKey<E>,
+    w: &Witness<E::ScalarField>,
+    rng: &mut R,
+) -> [DensePolynomial<E::ScalarField>; 3] {
+    [&w.a, &w.b, &w.c].map(|col| blind(&pk.domain, interpolate(&pk.domain, col), 1, rng))
 }
 
 /// Round 2: the permutation accumulator `z(X)`.
@@ -90,11 +101,14 @@ pub fn wire_polys<E: Pairing>(pk: &ProverKey<E>, w: &Witness<E::ScalarField>) ->
 /// `f_i` uses the identity labels and `g_i` the permuted ones. If the wires
 /// respect the copy constraints the two products agree overall, so the
 /// accumulator returns to 1 after a full lap.
-pub fn accumulator<E: Pairing>(
+///
+/// Opened at two points, so blinded with a degree-2 mask. Degree n+2.
+pub fn accumulator<E: Pairing, R: RngCore>(
     pk: &ProverKey<E>,
     w: &Witness<E::ScalarField>,
     beta: E::ScalarField,
     gamma: E::ScalarField,
+    rng: &mut R,
 ) -> DensePolynomial<E::ScalarField> {
     let n = pk.domain.size();
     let (id, perm) = pk.permutation.labels(&pk.domain, pk.k1, pk.k2);
@@ -112,7 +126,7 @@ pub fn accumulator<E: Pairing>(
         acc *= num * den.inverse().expect("gamma collided with a wire value");
     }
     debug_assert!(acc.is_one(), "copy constraints not satisfied");
-    interpolate(&pk.domain, &evals)
+    blind(&pk.domain, interpolate(&pk.domain, &evals), 2, rng)
 }
 
 /// Round 3: the quotient `t(X)`, split into three pieces of degree < n.
@@ -125,7 +139,9 @@ pub fn accumulator<E: Pairing>(
 ///
 /// Everything is evaluated on a coset of a domain of size 4n, multiplied
 /// pointwise and divided by `Z_H` there (which never vanishes off `H`), then
-/// interpolated back. `t` has degree < 3n so 4n points pin it down.
+/// interpolated back. With the blinding, `f z` has degree 4n+5 so `t` has
+/// degree 3n+5; 4n points pin it down as long as n >= 8. The last chunk
+/// therefore has degree up to n+5, not n-1.
 pub fn quotient<E: Pairing>(
     pk: &ProverKey<E>,
     wires: &[DensePolynomial<E::ScalarField>; 3],
@@ -136,6 +152,7 @@ pub fn quotient<E: Pairing>(
     alpha: E::ScalarField,
 ) -> [DensePolynomial<E::ScalarField>; 3] {
     let n = pk.domain.size();
+    assert!(n >= crate::preprocess::MIN_DOMAIN_SIZE);
     let coset = Radix2EvaluationDomain::<E::ScalarField>::new(4 * n)
         .expect("no domain of size 4n")
         .get_coset(E::ScalarField::GENERATOR)
@@ -169,8 +186,8 @@ pub fn quotient<E: Pairing>(
         t.push((gate + alpha * perm + alpha2 * start) / z_h);
     }
     let mut coeffs = coset.ifft(&t);
-    // Anything above 3n-1 must be zero if the constraints hold.
-    let tail = coeffs.split_off(3 * n);
+    // Anything above 3n+5 must be zero if the constraints hold.
+    let tail = coeffs.split_off(3 * n + 6);
     assert!(tail.iter().all(|c| c.is_zero()), "constraints not satisfied: quotient has a remainder");
 
     let hi = coeffs.split_off(2 * n);
@@ -183,7 +200,12 @@ pub fn quotient<E: Pairing>(
 }
 
 /// Run all five rounds and produce a proof.
-pub fn prove<E: Pairing>(srs: &Srs<E>, pk: &ProverKey<E>, circuit: &Circuit<E::ScalarField>) -> Proof<E> {
+pub fn prove<E: Pairing, R: RngCore>(
+    srs: &Srs<E>,
+    pk: &ProverKey<E>,
+    circuit: &Circuit<E::ScalarField>,
+    rng: &mut R,
+) -> Proof<E> {
     let n = pk.domain.size();
     let omega = pk.domain.group_gen();
     assert_eq!(circuit.num_public_inputs(), pk.vk.num_public_inputs);
@@ -195,7 +217,7 @@ pub fn prove<E: Pairing>(srs: &Srs<E>, pk: &ProverKey<E>, circuit: &Circuit<E::S
 
     // round 1
     let w = Witness::from_circuit(circuit, n);
-    let wires = wire_polys(pk, &w);
+    let wires = wire_polys(pk, &w, rng);
     let [ca, cb, cc] = [0, 1, 2].map(|i| srs.commit(&wires[i]));
     transcript.absorb(b"a", &ca.0);
     transcript.absorb(b"b", &cb.0);
@@ -204,7 +226,7 @@ pub fn prove<E: Pairing>(srs: &Srs<E>, pk: &ProverKey<E>, circuit: &Circuit<E::S
     // round 2
     let beta = transcript.challenge(b"beta");
     let gamma = transcript.challenge(b"gamma");
-    let z = accumulator(pk, &w, beta, gamma);
+    let z = accumulator(pk, &w, beta, gamma, rng);
     let cz = srs.commit(&z);
     transcript.absorb(b"z", &cz.0);
 
@@ -296,7 +318,7 @@ mod tests {
         let pk = preprocess(&c, &srs);
         let w = Witness::from_circuit(&c, pk.domain.size());
         let (beta, gamma) = (Fr::rand(&mut rng), Fr::rand(&mut rng));
-        let z = accumulator(&pk, &w, beta, gamma);
+        let z = accumulator(&pk, &w, beta, gamma, &mut rng);
         assert_eq!(z.evaluate(&Fr::one()), Fr::one());
         // z(omega^n) = z(1) = 1 is the wrap-around; check the recurrence too
         let n = pk.domain.size();
@@ -310,6 +332,20 @@ mod tests {
                 * (w.b[i] + beta * perm[n + i] + gamma)
                 * (w.c[i] + beta * perm[2 * n + i] + gamma);
             assert_eq!(z.evaluate(&(x * pk.domain.group_gen())) * den, z.evaluate(&x) * num);
+        }
+    }
+
+    #[test]
+    fn blinding_keeps_domain_values() {
+        let mut rng = test_rng();
+        let domain = Radix2EvaluationDomain::<Fr>::new(8).unwrap();
+        let evals: Vec<Fr> = (0..8).map(|_| Fr::rand(&mut rng)).collect();
+        let p = interpolate(&domain, &evals);
+        let q = blind(&domain, p.clone(), 2, &mut rng);
+        assert_ne!(p, q);
+        assert_eq!(q.degree(), 10);
+        for (i, e) in evals.iter().enumerate() {
+            assert_eq!(q.evaluate(&domain.element(i)), *e);
         }
     }
 
@@ -331,11 +367,11 @@ mod tests {
         let n = pk.domain.size();
         let w = Witness::from_circuit(&c, n);
         let (beta, gamma, alpha) = (Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng));
-        let wires = wire_polys(&pk, &w);
-        let z = accumulator(&pk, &w, beta, gamma);
+        let wires = wire_polys(&pk, &w, &mut rng);
+        let z = accumulator(&pk, &w, beta, gamma, &mut rng);
         let pi = public_input_poly(&pk.domain, &c.public_inputs());
         let [t_lo, t_mid, t_hi] = quotient(&pk, &wires, &z, &pi, beta, gamma, alpha);
-        assert!(t_lo.degree() < n && t_mid.degree() < n && t_hi.degree() < n);
+        assert!(t_lo.degree() < n && t_mid.degree() < n && t_hi.degree() < n + 6);
 
         // reassemble and spot-check the identity at a random point
         let zeta = Fr::rand(&mut rng);
@@ -373,8 +409,8 @@ mod tests {
         let pk = preprocess(&c, &srs);
         let w = Witness::from_circuit(&c, pk.domain.size());
         let (beta, gamma, alpha) = (Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng));
-        let wires = wire_polys(&pk, &w);
-        let z = accumulator(&pk, &w, beta, gamma);
+        let wires = wire_polys(&pk, &w, &mut rng);
+        let z = accumulator(&pk, &w, beta, gamma, &mut rng);
         let pi = public_input_poly(&pk.domain, &[]);
         quotient(&pk, &wires, &z, &pi, beta, gamma, alpha);
     }
