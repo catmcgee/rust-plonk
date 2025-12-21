@@ -6,7 +6,7 @@ use crate::preprocess::ProverKey;
 use crate::proof::{Evaluations, Proof};
 use crate::transcript::Transcript;
 use ark_ec::pairing::Pairing;
-use ark_ff::{FftField, Field, One, Zero};
+use ark_ff::{FftField, Field, One, UniformRand, Zero};
 use ark_poly::{
     univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, Polynomial,
     Radix2EvaluationDomain,
@@ -142,7 +142,13 @@ pub fn accumulator<E: Pairing, R: RngCore>(
 /// interpolated back. With the blinding, `f z` has degree 4n+5 so `t` has
 /// degree 3n+5; 4n points pin it down as long as n >= 8. The last chunk
 /// therefore has degree up to n+5, not n-1.
-pub fn quotient<E: Pairing>(
+///
+/// The chunks are then blinded against each other: `b X^n` added to one and
+/// `b` subtracted from the next leaves `t_lo + X^n t_mid + X^2n t_hi`
+/// unchanged, but the individual commitments no longer determine `t`'s
+/// coefficients.
+#[allow(clippy::too_many_arguments)]
+pub fn quotient<E: Pairing, R: RngCore>(
     pk: &ProverKey<E>,
     wires: &[DensePolynomial<E::ScalarField>; 3],
     z: &DensePolynomial<E::ScalarField>,
@@ -150,6 +156,7 @@ pub fn quotient<E: Pairing>(
     beta: E::ScalarField,
     gamma: E::ScalarField,
     alpha: E::ScalarField,
+    rng: &mut R,
 ) -> [DensePolynomial<E::ScalarField>; 3] {
     let n = pk.domain.size();
     assert!(n >= crate::preprocess::MIN_DOMAIN_SIZE);
@@ -190,10 +197,18 @@ pub fn quotient<E: Pairing>(
     let tail = coeffs.split_off(3 * n + 6);
     assert!(tail.iter().all(|c| c.is_zero()), "constraints not satisfied: quotient has a remainder");
 
-    let hi = coeffs.split_off(2 * n);
-    let mid = coeffs.split_off(n);
+    let mut hi = coeffs.split_off(2 * n);
+    let mut mid = coeffs.split_off(n);
+    let mut lo = coeffs;
+
+    let b10 = E::ScalarField::rand(rng);
+    let b11 = E::ScalarField::rand(rng);
+    lo.push(b10);
+    mid[0] -= b10;
+    mid.push(b11);
+    hi[0] -= b11;
     [
-        DensePolynomial::from_coefficients_vec(coeffs),
+        DensePolynomial::from_coefficients_vec(lo),
         DensePolynomial::from_coefficients_vec(mid),
         DensePolynomial::from_coefficients_vec(hi),
     ]
@@ -233,7 +248,7 @@ pub fn prove<E: Pairing, R: RngCore>(
     // round 3
     let alpha = transcript.challenge(b"alpha");
     let pi = public_input_poly(&pk.domain, &public_inputs);
-    let [t_lo, t_mid, t_hi] = quotient(pk, &wires, &z, &pi, beta, gamma, alpha);
+    let [t_lo, t_mid, t_hi] = quotient(pk, &wires, &z, &pi, beta, gamma, alpha, rng);
     let [ct_lo, ct_mid, ct_hi] = [&t_lo, &t_mid, &t_hi].map(|t| srs.commit(t));
     transcript.absorb(b"t_lo", &ct_lo.0);
     transcript.absorb(b"t_mid", &ct_mid.0);
@@ -370,8 +385,8 @@ mod tests {
         let wires = wire_polys(&pk, &w, &mut rng);
         let z = accumulator(&pk, &w, beta, gamma, &mut rng);
         let pi = public_input_poly(&pk.domain, &c.public_inputs());
-        let [t_lo, t_mid, t_hi] = quotient(&pk, &wires, &z, &pi, beta, gamma, alpha);
-        assert!(t_lo.degree() < n && t_mid.degree() < n && t_hi.degree() < n + 6);
+        let [t_lo, t_mid, t_hi] = quotient(&pk, &wires, &z, &pi, beta, gamma, alpha, &mut rng);
+        assert!(t_lo.degree() <= n && t_mid.degree() <= n && t_hi.degree() < n + 6);
 
         // reassemble and spot-check the identity at a random point
         let zeta = Fr::rand(&mut rng);
@@ -412,6 +427,6 @@ mod tests {
         let wires = wire_polys(&pk, &w, &mut rng);
         let z = accumulator(&pk, &w, beta, gamma, &mut rng);
         let pi = public_input_poly(&pk.domain, &[]);
-        quotient(&pk, &wires, &z, &pi, beta, gamma, alpha);
+        quotient(&pk, &wires, &z, &pi, beta, gamma, alpha, &mut rng);
     }
 }
