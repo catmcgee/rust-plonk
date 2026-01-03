@@ -7,7 +7,6 @@
 
 use crate::preprocess::VerifierKey;
 use crate::proof::Proof;
-use crate::transcript::Transcript;
 use ark_ec::pairing::Pairing;
 use ark_ff::{Field, One, Zero};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
@@ -22,9 +21,7 @@ pub fn verify<E: Pairing>(vk: &VerifierKey<E>, public_inputs: &[E::ScalarField],
     let ev = &proof.evals;
 
     // replay the transcript
-    let mut transcript = Transcript::new(b"plonk");
-    transcript.absorb(b"n", &(n as u64));
-    transcript.absorb(b"public inputs", &public_inputs.to_vec());
+    let mut transcript = vk.transcript(public_inputs);
     transcript.absorb(b"a", &proof.a.0);
     transcript.absorb(b"b", &proof.b.0);
     transcript.absorb(b"c", &proof.c.0);

@@ -4,7 +4,6 @@ use crate::circuit::Circuit;
 use crate::kzg::Srs;
 use crate::preprocess::ProverKey;
 use crate::proof::{Evaluations, Proof};
-use crate::transcript::Transcript;
 use ark_ec::pairing::Pairing;
 use ark_ff::{FftField, Field, One, UniformRand, Zero};
 use ark_poly::{
@@ -226,9 +225,7 @@ pub fn prove<E: Pairing, R: RngCore>(
     assert_eq!(circuit.num_public_inputs(), pk.vk.num_public_inputs);
     let public_inputs = circuit.public_inputs();
 
-    let mut transcript = Transcript::new(b"plonk");
-    transcript.absorb(b"n", &(n as u64));
-    transcript.absorb(b"public inputs", &public_inputs);
+    let mut transcript = pk.vk.transcript(&public_inputs);
 
     // round 1
     let w = Witness::from_circuit(circuit, n);

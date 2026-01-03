@@ -102,6 +102,30 @@ fn proof_for_one_circuit_does_not_verify_for_another() {
     assert!(!verify(&other_pk.vk, &[Fr::from(35u64)], &proof));
 }
 
+/// Two circuits with the same shape but different selectors must not share
+/// challenges, otherwise a proof for one could be replayed against the other.
+#[test]
+fn challenges_depend_on_the_circuit() {
+    use plonk::transcript::Transcript;
+    let mut rng = test_rng();
+    let srs = Srs::<Bls12_381>::setup(64, &mut rng);
+    let a = preprocess(&cubic(3, 35), &srs);
+    let mut other = Circuit::<Fr>::new();
+    let y = other.public_input(Fr::from(35u64));
+    let x = other.alloc(Fr::from(3u64));
+    let x2 = other.mul(x, x);
+    let x3 = other.mul(x2, x);
+    let six = other.constant(Fr::from(6u64));
+    let s = other.add(x3, x);
+    let s = other.add(s, six);
+    other.assert_equal(s, y);
+    let b = preprocess(&other, &srs);
+    let pi = [Fr::from(35u64)];
+    let mut ta: Transcript = a.vk.transcript(&pi);
+    let mut tb: Transcript = b.vk.transcript(&pi);
+    assert_ne!(ta.challenge::<Fr>(b"x"), tb.challenge::<Fr>(b"x"));
+}
+
 #[test]
 fn a_few_hundred_gates() {
     let mut rng = test_rng();

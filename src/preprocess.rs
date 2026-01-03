@@ -3,6 +3,7 @@
 use crate::circuit::Circuit;
 use crate::kzg::{self, Commitment, Srs};
 use crate::permutation::{coset_generators, Permutation};
+use crate::transcript::Transcript;
 use ark_ec::pairing::Pairing;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, Radix2EvaluationDomain};
 
@@ -34,6 +35,32 @@ pub struct VerifierKey<E: Pairing> {
     pub s_sigma: [Commitment<E>; 3],
     pub num_public_inputs: usize,
     pub kzg: kzg::VerifierKey<E>,
+}
+
+impl<E: Pairing> VerifierKey<E> {
+    /// Start a transcript bound to this key and the public inputs. The
+    /// prover and verifier both go through here so the challenges can't be
+    /// independent of the circuit, which would let a prover who picks the
+    /// circuit pick selectors that satisfy an arbitrary "proof".
+    pub fn transcript(&self, public_inputs: &[E::ScalarField]) -> Transcript {
+        let mut t = Transcript::new(b"plonk");
+        t.absorb(b"n", &(self.n as u64));
+        t.absorb(b"k1", &self.k1);
+        t.absorb(b"k2", &self.k2);
+        t.absorb(b"q_l", &self.q_l.0);
+        t.absorb(b"q_r", &self.q_r.0);
+        t.absorb(b"q_o", &self.q_o.0);
+        t.absorb(b"q_m", &self.q_m.0);
+        t.absorb(b"q_c", &self.q_c.0);
+        t.absorb(b"s_sigma1", &self.s_sigma[0].0);
+        t.absorb(b"s_sigma2", &self.s_sigma[1].0);
+        t.absorb(b"s_sigma3", &self.s_sigma[2].0);
+        t.absorb(b"g", &self.kzg.g);
+        t.absorb(b"h", &self.kzg.h);
+        t.absorb(b"tau_h", &self.kzg.tau_h);
+        t.absorb(b"public inputs", &public_inputs.to_vec());
+        t
+    }
 }
 
 /// Smallest domain we'll use. The blinded quotient has degree 3n+5 and is
