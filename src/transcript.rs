@@ -1,12 +1,15 @@
 //! Fiat-Shamir transcript.
 //!
 //! Every message the prover would send gets absorbed; challenges are derived by
-//! hashing the running state. Absorbing a challenge back in keeps the state
-//! moving so two challenges in a row are different.
+//! hashing the running state. Absorbing the challenge label back in keeps the
+//! state moving so two challenges in a row are different.
+//!
+//! Challenges are reduced from 64 bytes, not 32: reducing a 256-bit digest
+//! modulo the ~255-bit scalar field would leave a bias of a few percent.
 
 use ark_ff::PrimeField;
 use ark_serialize::CanonicalSerialize;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 
 pub struct Transcript {
     state: [u8; 32],
@@ -38,7 +41,8 @@ impl Transcript {
 
     pub fn challenge<F: PrimeField>(&mut self, label: &[u8]) -> F {
         self.absorb_bytes(b"challenge", label);
-        F::from_le_bytes_mod_order(&self.state)
+        let wide = Sha512::new().chain_update(b"squeeze").chain_update(self.state).finalize();
+        F::from_le_bytes_mod_order(&wide)
     }
 }
 
