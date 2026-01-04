@@ -3,7 +3,7 @@
 //! The setup is a plain powers-of-tau with the secret sampled locally, which is
 //! only fine for tests. A real deployment needs an MPC ceremony.
 
-use ark_ec::{pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, AffineRepr, CurveGroup};
+use ark_ec::{pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{Field, One, PrimeField, UniformRand, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_std::rand::RngCore;
@@ -32,11 +32,12 @@ pub struct Commitment<E: Pairing>(pub E::G1Affine);
 pub struct Proof<E: Pairing>(pub E::G1Affine);
 
 impl<E: Pairing> Srs<E> {
-    /// Sample a fresh `tau` and compute powers up to `max_degree`.
+    /// Sample a fresh `tau` and compute powers up to `max_degree`, over the
+    /// curve's standard generators so the result looks like a real ceremony's.
     pub fn setup<R: RngCore>(max_degree: usize, rng: &mut R) -> Self {
         let tau = E::ScalarField::rand(rng);
-        let g = E::G1::rand(rng);
-        let h = E::G2::rand(rng);
+        let g = E::G1::generator();
+        let h = E::G2::generator();
 
         let mut powers = Vec::with_capacity(max_degree + 1);
         let mut cur = E::ScalarField::one();
