@@ -16,7 +16,9 @@ pub fn verify<E: Pairing>(vk: &VerifierKey<E>, public_inputs: &[E::ScalarField],
         return false;
     }
     let n = vk.n;
-    let domain = Radix2EvaluationDomain::<E::ScalarField>::new(n).unwrap();
+    let Some(domain) = Radix2EvaluationDomain::<E::ScalarField>::new(n) else {
+        return false;
+    };
     let omega = domain.group_gen();
     let ev = &proof.evals;
 

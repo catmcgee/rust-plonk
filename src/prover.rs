@@ -11,6 +11,28 @@ use ark_poly::{
     Radix2EvaluationDomain,
 };
 use ark_std::rand::RngCore;
+use std::fmt;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProveError {
+    /// The witness doesn't satisfy the circuit.
+    Unsatisfied,
+    /// The circuit declares a different number of public inputs than the key.
+    PublicInputCount { expected: usize, got: usize },
+}
+
+impl fmt::Display for ProveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProveError::Unsatisfied => write!(f, "witness does not satisfy the circuit"),
+            ProveError::PublicInputCount { expected, got } => {
+                write!(f, "circuit has {got} public inputs, key expects {expected}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProveError {}
 
 /// Wire values laid out column by column, padded to the domain size.
 pub struct Witness<F> {
@@ -124,7 +146,8 @@ pub fn accumulator<E: Pairing, R: RngCore>(
             * (w.c[i] + beta * perm[2 * n + i] + gamma);
         acc *= num * den.inverse().expect("gamma collided with a wire value");
     }
-    debug_assert!(acc.is_one(), "copy constraints not satisfied");
+    // If the copy constraints don't hold, `acc` isn't 1 here. Don't check:
+    // the quotient computation will fail to divide and report it properly.
     blind(&pk.domain, interpolate(&pk.domain, &evals), 2, rng)
 }
 
@@ -156,7 +179,7 @@ pub fn quotient<E: Pairing, R: RngCore>(
     gamma: E::ScalarField,
     alpha: E::ScalarField,
     rng: &mut R,
-) -> [DensePolynomial<E::ScalarField>; 3] {
+) -> Result<[DensePolynomial<E::ScalarField>; 3], ProveError> {
     let n = pk.domain.size();
     assert!(n >= crate::preprocess::MIN_DOMAIN_SIZE);
     let coset = Radix2EvaluationDomain::<E::ScalarField>::new(4 * n)
@@ -192,9 +215,13 @@ pub fn quotient<E: Pairing, R: RngCore>(
         t.push((gate + alpha * perm + alpha2 * start) / z_h);
     }
     let mut coeffs = coset.ifft(&t);
-    // Anything above 3n+5 must be zero if the constraints hold.
+    // If the constraints hold the numerator is divisible by Z_H and t has
+    // degree at most 3n+5. If they don't, the division leaves junk in the
+    // high coefficients, which is how we detect a bad witness.
     let tail = coeffs.split_off(3 * n + 6);
-    assert!(tail.iter().all(|c| c.is_zero()), "constraints not satisfied: quotient has a remainder");
+    if !tail.iter().all(|c| c.is_zero()) {
+        return Err(ProveError::Unsatisfied);
+    }
 
     let mut hi = coeffs.split_off(2 * n);
     let mut mid = coeffs.split_off(n);
@@ -206,11 +233,11 @@ pub fn quotient<E: Pairing, R: RngCore>(
     mid[0] -= b10;
     mid.push(b11);
     hi[0] -= b11;
-    [
+    Ok([
         DensePolynomial::from_coefficients_vec(lo),
         DensePolynomial::from_coefficients_vec(mid),
         DensePolynomial::from_coefficients_vec(hi),
-    ]
+    ])
 }
 
 /// Run all five rounds and produce a proof.
@@ -219,10 +246,15 @@ pub fn prove<E: Pairing, R: RngCore>(
     pk: &ProverKey<E>,
     circuit: &Circuit<E::ScalarField>,
     rng: &mut R,
-) -> Proof<E> {
+) -> Result<Proof<E>, ProveError> {
     let n = pk.domain.size();
     let omega = pk.domain.group_gen();
-    assert_eq!(circuit.num_public_inputs(), pk.vk.num_public_inputs);
+    if circuit.num_public_inputs() != pk.vk.num_public_inputs {
+        return Err(ProveError::PublicInputCount {
+            expected: pk.vk.num_public_inputs,
+            got: circuit.num_public_inputs(),
+        });
+    }
     let public_inputs = circuit.public_inputs();
 
     let mut transcript = pk.vk.transcript(&public_inputs);
@@ -245,7 +277,7 @@ pub fn prove<E: Pairing, R: RngCore>(
     // round 3
     let alpha = transcript.challenge(b"alpha");
     let pi = public_input_poly(&pk.domain, &public_inputs);
-    let [t_lo, t_mid, t_hi] = quotient(pk, &wires, &z, &pi, beta, gamma, alpha, rng);
+    let [t_lo, t_mid, t_hi] = quotient(pk, &wires, &z, &pi, beta, gamma, alpha, rng)?;
     let [ct_lo, ct_mid, ct_hi] = [&t_lo, &t_mid, &t_hi].map(|t| srs.commit(t));
     transcript.absorb(b"t_lo", &ct_lo.0);
     transcript.absorb(b"t_mid", &ct_mid.0);
@@ -286,7 +318,7 @@ pub fn prove<E: Pairing, R: RngCore>(
     let (_, w_zeta) = srs.open_batch(&at_zeta, zeta, v);
     let (_, w_zeta_omega) = srs.open(&z, zeta * omega);
 
-    Proof {
+    Ok(Proof {
         a: ca,
         b: cb,
         c: cc,
@@ -297,7 +329,7 @@ pub fn prove<E: Pairing, R: RngCore>(
         evals,
         w_zeta,
         w_zeta_omega,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -382,7 +414,7 @@ mod tests {
         let wires = wire_polys(&pk, &w, &mut rng);
         let z = accumulator(&pk, &w, beta, gamma, &mut rng);
         let pi = public_input_poly(&pk.domain, &c.public_inputs());
-        let [t_lo, t_mid, t_hi] = quotient(&pk, &wires, &z, &pi, beta, gamma, alpha, &mut rng);
+        let [t_lo, t_mid, t_hi] = quotient(&pk, &wires, &z, &pi, beta, gamma, alpha, &mut rng).unwrap();
         assert!(t_lo.degree() <= n && t_mid.degree() <= n && t_hi.degree() < n + 6);
 
         // reassemble and spot-check the identity at a random point
@@ -408,7 +440,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "remainder")]
     fn bad_witness_has_remainder() {
         let mut rng = test_rng();
         let srs = Srs::<Bls12_381>::setup(32, &mut rng);
@@ -424,6 +455,9 @@ mod tests {
         let wires = wire_polys(&pk, &w, &mut rng);
         let z = accumulator(&pk, &w, beta, gamma, &mut rng);
         let pi = public_input_poly(&pk.domain, &[]);
-        quotient(&pk, &wires, &z, &pi, beta, gamma, alpha, &mut rng);
+        assert_eq!(
+            quotient(&pk, &wires, &z, &pi, beta, gamma, alpha, &mut rng).err(),
+            Some(ProveError::Unsatisfied)
+        );
     }
 }

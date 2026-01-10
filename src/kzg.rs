@@ -145,7 +145,9 @@ impl<E: Pairing> VerifierKey<E> {
         gamma: E::ScalarField,
         proof: &Proof<E>,
     ) -> bool {
-        assert_eq!(comms.len(), values.len());
+        if comms.len() != values.len() {
+            return false;
+        }
         let mut folded_comm = E::G1::zero();
         let mut folded_value = E::ScalarField::zero();
         let mut coeff = E::ScalarField::one();

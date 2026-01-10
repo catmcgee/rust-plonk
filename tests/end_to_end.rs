@@ -1,6 +1,6 @@
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_std::test_rng;
-use plonk::{preprocess, prove, verify, Circuit, Srs};
+use plonk::{preprocess, prove, verify, Circuit, ProveError, Srs};
 
 /// x^3 + x + 5 = y, with y public. The classic.
 fn cubic(x: u64, y: u64) -> Circuit<Fr> {
@@ -23,7 +23,7 @@ fn cubic_proves_and_verifies() {
     let circuit = cubic(3, 35);
     assert!(circuit.is_satisfied());
     let pk = preprocess(&circuit, &srs);
-    let proof = prove(&srs, &pk, &circuit, &mut rng);
+    let proof = prove(&srs, &pk, &circuit, &mut rng).unwrap();
     assert!(verify(&pk.vk, &circuit.public_inputs(), &proof));
 }
 
@@ -33,20 +33,19 @@ fn wrong_public_input_rejected() {
     let srs = Srs::<Bls12_381>::setup(64, &mut rng);
     let circuit = cubic(3, 35);
     let pk = preprocess(&circuit, &srs);
-    let proof = prove(&srs, &pk, &circuit, &mut rng);
+    let proof = prove(&srs, &pk, &circuit, &mut rng).unwrap();
     assert!(!verify(&pk.vk, &[Fr::from(36u64)], &proof));
     assert!(!verify(&pk.vk, &[], &proof));
 }
 
 #[test]
-#[should_panic]
 fn unsatisfied_circuit_cannot_prove() {
     let mut rng = test_rng();
     let srs = Srs::<Bls12_381>::setup(64, &mut rng);
     let circuit = cubic(3, 36);
     assert!(!circuit.is_satisfied());
     let pk = preprocess(&circuit, &srs);
-    let _ = prove(&srs, &pk, &circuit, &mut rng);
+    assert_eq!(prove(&srs, &pk, &circuit, &mut rng).err(), Some(ProveError::Unsatisfied));
 }
 
 #[test]
@@ -56,7 +55,7 @@ fn tampered_proof_rejected() {
     let srs = Srs::<Bls12_381>::setup(64, &mut rng);
     let circuit = cubic(3, 35);
     let pk = preprocess(&circuit, &srs);
-    let proof = prove(&srs, &pk, &circuit, &mut rng);
+    let proof = prove(&srs, &pk, &circuit, &mut rng).unwrap();
     let pi = circuit.public_inputs();
 
     let mut p = proof.clone();
@@ -86,7 +85,7 @@ fn proof_for_one_circuit_does_not_verify_for_another() {
     let srs = Srs::<Bls12_381>::setup(64, &mut rng);
     let circuit = cubic(3, 35);
     let pk = preprocess(&circuit, &srs);
-    let proof = prove(&srs, &pk, &circuit, &mut rng);
+    let proof = prove(&srs, &pk, &circuit, &mut rng).unwrap();
 
     // same shape, different constant
     let mut other = Circuit::<Fr>::new();
@@ -145,7 +144,7 @@ fn a_few_hundred_gates() {
     assert!(c.is_satisfied());
     let pk = preprocess(&c, &srs);
     assert_eq!(pk.vk.n, 1024);
-    let proof = prove(&srs, &pk, &c, &mut rng);
+    let proof = prove(&srs, &pk, &c, &mut rng).unwrap();
     assert!(verify(&pk.vk, &c.public_inputs(), &proof));
     assert!(!verify(&pk.vk, &[Fr::from(1u64)], &proof));
 }
