@@ -1,13 +1,9 @@
-//! The verifier.
-//!
-//! First version: the prover opens every polynomial at `zeta`, and the
-//! verifier checks the polynomial identity in the field, then checks the
-//! openings against the commitments. Simple, but the proof is bigger than it
-//! needs to be.
+//! The verifier, following section 8.4 of the paper.
 
+use crate::kzg::Commitment;
 use crate::preprocess::VerifierKey;
 use crate::proof::Proof;
-use ark_ec::pairing::Pairing;
+use ark_ec::{pairing::Pairing, CurveGroup};
 use ark_ff::{Field, One, Zero};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 
@@ -21,6 +17,7 @@ pub fn verify<E: Pairing>(vk: &VerifierKey<E>, public_inputs: &[E::ScalarField],
     };
     let omega = domain.group_gen();
     let ev = &proof.evals;
+    let one = E::ScalarField::one();
 
     // replay the transcript
     let mut transcript = vk.transcript(public_inputs);
@@ -35,26 +32,26 @@ pub fn verify<E: Pairing>(vk: &VerifierKey<E>, public_inputs: &[E::ScalarField],
     transcript.absorb(b"t_mid", &proof.t_mid.0);
     transcript.absorb(b"t_hi", &proof.t_hi.0);
     let zeta: E::ScalarField = transcript.challenge(b"zeta");
-    let at_zeta = [
-        ev.a, ev.b, ev.c, ev.z, ev.t_lo, ev.t_mid, ev.t_hi,
-        ev.q_l, ev.q_r, ev.q_o, ev.q_m, ev.q_c,
-        ev.s_sigma[0], ev.s_sigma[1], ev.s_sigma[2],
-    ];
-    for v in &at_zeta {
-        transcript.absorb(b"eval", v);
-    }
-    transcript.absorb(b"eval", &ev.z_omega);
+    transcript.absorb(b"a(zeta)", &ev.a);
+    transcript.absorb(b"b(zeta)", &ev.b);
+    transcript.absorb(b"c(zeta)", &ev.c);
+    transcript.absorb(b"s_sigma1(zeta)", &ev.s_sigma1);
+    transcript.absorb(b"s_sigma2(zeta)", &ev.s_sigma2);
+    transcript.absorb(b"z(zeta omega)", &ev.z_omega);
     let v: E::ScalarField = transcript.challenge(b"v");
+    transcript.absorb(b"w_zeta", &proof.w_zeta.0);
+    transcript.absorb(b"w_zeta_omega", &proof.w_zeta_omega.0);
+    let u: E::ScalarField = transcript.challenge(b"u");
 
     // zeta in H would make Z_H(zeta) = 0 and the identity vacuous
     let zeta_n = zeta.pow([n as u64]);
-    let z_h = zeta_n - E::ScalarField::one();
+    let z_h = zeta_n - one;
     if z_h.is_zero() {
         return false;
     }
     // L_1(zeta) = (zeta^n - 1) / (n (zeta - 1))
-    let l1 = z_h / (E::ScalarField::from(n as u64) * (zeta - E::ScalarField::one()));
-    // PI(zeta) = -sum x_i L_i(zeta), with L_i(zeta) = omega^i (zeta^n - 1) / (n (zeta - omega^i))
+    let l1 = z_h / (E::ScalarField::from(n as u64) * (zeta - one));
+    // PI(zeta) = -sum x_i L_i(zeta)
     let lagrange = domain.evaluate_all_lagrange_coefficients(zeta);
     let pi: E::ScalarField = -public_inputs
         .iter()
@@ -62,26 +59,36 @@ pub fn verify<E: Pairing>(vk: &VerifierKey<E>, public_inputs: &[E::ScalarField],
         .map(|(x, l)| *x * l)
         .sum::<E::ScalarField>();
 
-    // the identity at zeta
-    let gate = ev.a * ev.b * ev.q_m + ev.a * ev.q_l + ev.b * ev.q_r + ev.c * ev.q_o + ev.q_c + pi;
-    let f = (ev.a + beta * zeta + gamma)
-        * (ev.b + beta * vk.k1 * zeta + gamma)
-        * (ev.c + beta * vk.k2 * zeta + gamma);
-    let g = (ev.a + beta * ev.s_sigma[0] + gamma)
-        * (ev.b + beta * ev.s_sigma[1] + gamma)
-        * (ev.c + beta * ev.s_sigma[2] + gamma);
-    let lhs = gate + alpha * (f * ev.z - g * ev.z_omega) + alpha * alpha * (ev.z - E::ScalarField::one()) * l1;
-    let t = ev.t_lo + zeta_n * ev.t_mid + zeta_n * zeta_n * ev.t_hi;
-    if lhs != t * z_h {
-        return false;
-    }
+    // r(X) = r_0 + (linear combination of committed polynomials). The
+    // constant part is computed here, the rest as a commitment [D].
+    let f = (ev.a + beta * zeta + gamma) * (ev.b + beta * vk.k1 * zeta + gamma) * (ev.c + beta * vk.k2 * zeta + gamma);
+    let g_partial = (ev.a + beta * ev.s_sigma1 + gamma) * (ev.b + beta * ev.s_sigma2 + gamma);
+    let r0 = pi - l1 * alpha * alpha - alpha * g_partial * (ev.c + gamma) * ev.z_omega;
 
-    // the openings
-    let comms = [
-        proof.a, proof.b, proof.c, proof.z, proof.t_lo, proof.t_mid, proof.t_hi,
-        vk.q_l, vk.q_r, vk.q_o, vk.q_m, vk.q_c,
-        vk.s_sigma[0], vk.s_sigma[1], vk.s_sigma[2],
-    ];
-    vk.kzg.verify_batch(&comms, zeta, &at_zeta, v, &proof.w_zeta)
-        && vk.kzg.verify(&proof.z, zeta * omega, ev.z_omega, &proof.w_zeta_omega)
+    let alpha2 = alpha * alpha;
+    let d = vk.q_m.0 * (ev.a * ev.b)
+        + vk.q_l.0 * ev.a
+        + vk.q_r.0 * ev.b
+        + vk.q_o.0 * ev.c
+        + vk.q_c.0
+        + proof.z.0 * (alpha * f + alpha2 * l1)
+        - vk.s_sigma[2].0 * (alpha * g_partial * beta * ev.z_omega)
+        - (proof.t_lo.0 + proof.t_mid.0 * zeta_n + proof.t_hi.0 * (zeta_n * zeta_n)) * z_h;
+
+    // fold [D], [a], [b], [c], [S_sigma1], [S_sigma2] with v, same order as the prover
+    let v2 = v * v;
+    let v3 = v2 * v;
+    let v4 = v3 * v;
+    let v5 = v4 * v;
+    let folded_comm = d + proof.a.0 * v + proof.b.0 * v2 + proof.c.0 * v3 + vk.s_sigma[0].0 * v4 + vk.s_sigma[1].0 * v5;
+    // r(zeta) = 0, i.e. D(zeta) = -r_0
+    let folded_value = -r0 + v * ev.a + v2 * ev.b + v3 * ev.c + v4 * ev.s_sigma1 + v5 * ev.s_sigma2;
+
+    vk.kzg.verify_multi_point(
+        &[
+            (Commitment(folded_comm.into_affine()), zeta, folded_value, proof.w_zeta),
+            (proof.z, zeta * omega, ev.z_omega, proof.w_zeta_omega),
+        ],
+        u,
+    )
 }

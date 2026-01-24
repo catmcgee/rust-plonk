@@ -67,6 +67,10 @@ fn tampered_proof_rejected() {
     assert!(!verify(&pk.vk, &pi, &p));
 
     let mut p = proof.clone();
+    p.evals.s_sigma1 = p.evals.s_sigma2;
+    assert!(!verify(&pk.vk, &pi, &p));
+
+    let mut p = proof.clone();
     p.z = plonk::kzg::Commitment((p.z.0 + p.a.0).into());
     assert!(!verify(&pk.vk, &pi, &p));
 

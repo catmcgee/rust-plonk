@@ -158,6 +158,30 @@ impl<E: Pairing> VerifierKey<E> {
         }
         self.verify(&Commitment(folded_comm.into_affine()), z, folded_value, proof)
     }
+
+    /// Check several openings, possibly at different points, with one pairing
+    /// equation. Each `(C_i, z_i, v_i, W_i)` satisfies
+    /// `e(C_i - v_i G + z_i W_i, H) = e(W_i, tau H)`; a random `u` from the
+    /// verifier combines them:
+    ///
+    /// ```text
+    /// e(sum u^i (C_i - v_i G + z_i W_i), H) = e(sum u^i W_i, tau H)
+    /// ```
+    pub fn verify_multi_point(
+        &self,
+        openings: &[(Commitment<E>, E::ScalarField, E::ScalarField, Proof<E>)],
+        u: E::ScalarField,
+    ) -> bool {
+        let mut lhs = E::G1::zero();
+        let mut ws = E::G1::zero();
+        let mut coeff = E::ScalarField::one();
+        for (c, z, v, w) in openings {
+            lhs += (c.0.into_group() - self.g * v + w.0 * z) * coeff;
+            ws += w.0 * coeff;
+            coeff *= u;
+        }
+        E::multi_pairing([lhs, -ws], [self.h, self.tau_h]).0.is_one()
+    }
 }
 
 /// Divide `p` by `(X - z)`. Returns `(quotient, remainder)`; the remainder is `p(z)`.
@@ -243,6 +267,24 @@ mod tests {
         bad[2] += Fr::one();
         assert!(!vk.verify_batch(&comms, z, &bad, gamma, &proof));
         assert!(!vk.verify_batch(&comms, z, &values, gamma + Fr::one(), &proof));
+    }
+
+    #[test]
+    fn multi_point() {
+        let mut rng = test_rng();
+        let srs = Srs::<Bls12_381>::setup(32, &mut rng);
+        let vk = srs.verifier_key();
+        let p = DensePolynomial::<Fr>::rand(12, &mut rng);
+        let q = DensePolynomial::<Fr>::rand(12, &mut rng);
+        let (cp, cq) = (srs.commit(&p), srs.commit(&q));
+        let (z1, z2) = (Fr::rand(&mut rng), Fr::rand(&mut rng));
+        let (vp, wp) = srs.open(&p, z1);
+        let (vq, wq) = srs.open(&q, z2);
+        let u = Fr::rand(&mut rng);
+        assert!(vk.verify_multi_point(&[(cp, z1, vp, wp), (cq, z2, vq, wq)], u));
+        assert!(!vk.verify_multi_point(&[(cp, z1, vp, wp), (cq, z2, vq + Fr::one(), wq)], u));
+        assert!(!vk.verify_multi_point(&[(cp, z1, vp, wq), (cq, z2, vq, wp)], u));
+        assert!(!vk.verify_multi_point(&[(cp, z2, vp, wp), (cq, z1, vq, wq)], u));
     }
 
     #[test]

@@ -240,6 +240,48 @@ pub fn quotient<E: Pairing, R: RngCore>(
     ])
 }
 
+/// The linearisation polynomial `r(X)`.
+///
+/// Take the identity `t Z_H = gate + alpha perm + alpha^2 start`, fix the
+/// evaluations of `a, b, c, S_sigma1, S_sigma2` at `zeta` and of `z` at
+/// `zeta omega`, and what's left is linear in the remaining polynomials.
+/// The verifier can build its commitment from the proof and the verifier key
+/// without knowing the polynomials, and for an honest prover `r(zeta) = 0`.
+#[allow(clippy::too_many_arguments)]
+pub fn linearisation<E: Pairing>(
+    pk: &ProverKey<E>,
+    z: &DensePolynomial<E::ScalarField>,
+    t: &[DensePolynomial<E::ScalarField>; 3],
+    ev: &Evaluations<E::ScalarField>,
+    pi_at_zeta: E::ScalarField,
+    beta: E::ScalarField,
+    gamma: E::ScalarField,
+    alpha: E::ScalarField,
+    zeta: E::ScalarField,
+) -> DensePolynomial<E::ScalarField> {
+    let n = pk.domain.size() as u64;
+    let one = E::ScalarField::one();
+    let zeta_n = zeta.pow([n]);
+    let z_h = zeta_n - one;
+    let l1 = z_h / (E::ScalarField::from(n) * (zeta - one));
+    let konst = |k: E::ScalarField| DensePolynomial::from_coefficients_vec(vec![k]);
+
+    let gate = &(&(&(&(&pk.q_m * (ev.a * ev.b)) + &(&pk.q_l * ev.a)) + &(&pk.q_r * ev.b)) + &(&pk.q_o * ev.c))
+        + &(&pk.q_c + &konst(pi_at_zeta));
+
+    let f = (ev.a + beta * zeta + gamma) * (ev.b + beta * pk.k1 * zeta + gamma) * (ev.c + beta * pk.k2 * zeta + gamma);
+    let g_partial = (ev.a + beta * ev.s_sigma1 + gamma) * (ev.b + beta * ev.s_sigma2 + gamma);
+    // g = g_partial * (c + beta S_sigma3(X) + gamma)
+    let g = &(&pk.s_sigma[2] * (g_partial * beta)) + &konst(g_partial * (ev.c + gamma));
+    let perm = &(z * f) - &(&g * ev.z_omega);
+
+    let start = &(z - &konst(one)) * l1;
+
+    let quotient = &(&t[0] + &(&t[1] * zeta_n)) + &(&t[2] * (zeta_n * zeta_n));
+
+    &(&(&gate + &(&perm * alpha)) + &(&start * (alpha * alpha))) - &(&quotient * z_h)
+}
+
 /// Run all five rounds and produce a proof.
 pub fn prove<E: Pairing, R: RngCore>(
     srs: &Srs<E>,
@@ -277,8 +319,8 @@ pub fn prove<E: Pairing, R: RngCore>(
     // round 3
     let alpha = transcript.challenge(b"alpha");
     let pi = public_input_poly(&pk.domain, &public_inputs);
-    let [t_lo, t_mid, t_hi] = quotient(pk, &wires, &z, &pi, beta, gamma, alpha, rng)?;
-    let [ct_lo, ct_mid, ct_hi] = [&t_lo, &t_mid, &t_hi].map(|t| srs.commit(t));
+    let t = quotient(pk, &wires, &z, &pi, beta, gamma, alpha, rng)?;
+    let [ct_lo, ct_mid, ct_hi] = [0, 1, 2].map(|i| srs.commit(&t[i]));
     transcript.absorb(b"t_lo", &ct_lo.0);
     transcript.absorb(b"t_mid", &ct_mid.0);
     transcript.absorb(b"t_hi", &ct_hi.0);
@@ -286,36 +328,26 @@ pub fn prove<E: Pairing, R: RngCore>(
     // round 4
     let zeta: E::ScalarField = transcript.challenge(b"zeta");
     let [a, b, c] = &wires;
-    let at_zeta = [
-        a, b, c, &z, &t_lo, &t_mid, &t_hi,
-        &pk.q_l, &pk.q_r, &pk.q_o, &pk.q_m, &pk.q_c,
-        &pk.s_sigma[0], &pk.s_sigma[1], &pk.s_sigma[2],
-    ];
-    let e: Vec<E::ScalarField> = at_zeta.iter().map(|p| p.evaluate(&zeta)).collect();
     let evals = Evaluations {
-        a: e[0],
-        b: e[1],
-        c: e[2],
-        z: e[3],
-        t_lo: e[4],
-        t_mid: e[5],
-        t_hi: e[6],
-        q_l: e[7],
-        q_r: e[8],
-        q_o: e[9],
-        q_m: e[10],
-        q_c: e[11],
-        s_sigma: [e[12], e[13], e[14]],
+        a: a.evaluate(&zeta),
+        b: b.evaluate(&zeta),
+        c: c.evaluate(&zeta),
+        s_sigma1: pk.s_sigma[0].evaluate(&zeta),
+        s_sigma2: pk.s_sigma[1].evaluate(&zeta),
         z_omega: z.evaluate(&(zeta * omega)),
     };
-    for v in &e {
-        transcript.absorb(b"eval", v);
-    }
-    transcript.absorb(b"eval", &evals.z_omega);
+    transcript.absorb(b"a(zeta)", &evals.a);
+    transcript.absorb(b"b(zeta)", &evals.b);
+    transcript.absorb(b"c(zeta)", &evals.c);
+    transcript.absorb(b"s_sigma1(zeta)", &evals.s_sigma1);
+    transcript.absorb(b"s_sigma2(zeta)", &evals.s_sigma2);
+    transcript.absorb(b"z(zeta omega)", &evals.z_omega);
 
     // round 5
     let v = transcript.challenge(b"v");
-    let (_, w_zeta) = srs.open_batch(&at_zeta, zeta, v);
+    let r = linearisation(pk, &z, &t, &evals, pi.evaluate(&zeta), beta, gamma, alpha, zeta);
+    let (values, w_zeta) = srs.open_batch(&[&r, a, b, c, &pk.s_sigma[0], &pk.s_sigma[1]], zeta, v);
+    debug_assert!(values[0].is_zero(), "r(zeta) != 0");
     let (_, w_zeta_omega) = srs.open(&z, zeta * omega);
 
     Ok(Proof {
