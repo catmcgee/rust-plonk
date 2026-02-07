@@ -6,6 +6,7 @@ use crate::permutation::{coset_generators, Permutation};
 use crate::transcript::Transcript;
 use ark_ec::pairing::Pairing;
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, Radix2EvaluationDomain};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 #[derive(Clone, Debug)]
 pub struct ProverKey<E: Pairing> {
@@ -22,7 +23,7 @@ pub struct ProverKey<E: Pairing> {
     pub vk: VerifierKey<E>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct VerifierKey<E: Pairing> {
     pub n: usize,
     pub k1: E::ScalarField,

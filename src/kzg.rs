@@ -6,6 +6,7 @@
 use ark_ec::{pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{Field, One, PrimeField, UniformRand, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::RngCore;
 
 /// Structured reference string: `[1, tau, tau^2, ..., tau^d]` in G1 and `[1, tau]` in G2.
@@ -17,18 +18,18 @@ pub struct Srs<E: Pairing> {
 }
 
 /// Everything the verifier needs from the SRS.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct VerifierKey<E: Pairing> {
     pub g: E::G1Affine,
     pub h: E::G2Affine,
     pub tau_h: E::G2Affine,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct Commitment<E: Pairing>(pub E::G1Affine);
 
 /// Witness `[(p(X) - p(z)) / (X - z)]_1` for an evaluation at `z`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct Proof<E: Pairing>(pub E::G1Affine);
 
 impl<E: Pairing> Srs<E> {

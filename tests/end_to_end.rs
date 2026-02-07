@@ -152,3 +152,37 @@ fn a_few_hundred_gates() {
     assert!(verify(&pk.vk, &c.public_inputs(), &proof));
     assert!(!verify(&pk.vk, &[Fr::from(1u64)], &proof));
 }
+
+#[test]
+fn proof_round_trips_through_bytes() {
+    use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+    use plonk::{Proof, VerifierKey};
+    let mut rng = test_rng();
+    let srs = Srs::<Bls12_381>::setup(64, &mut rng);
+    let circuit = cubic(3, 35);
+    let pk = preprocess(&circuit, &srs);
+    let proof = prove(&srs, &pk, &circuit, &mut rng).unwrap();
+
+    let bytes = proof.to_bytes();
+    // 7 G1 points + 6 scalars + 2 G1 points
+    assert_eq!(bytes.len(), 9 * 48 + 6 * 32);
+    let back = Proof::<Bls12_381>::from_bytes(&bytes).unwrap();
+    assert_eq!(back, proof);
+    assert!(verify(&pk.vk, &circuit.public_inputs(), &back));
+
+    // a flipped bit is either unparseable or an invalid proof
+    for i in [0, 47, 48, 9 * 48 + 3, bytes.len() - 1] {
+        let mut bad = bytes.clone();
+        bad[i] ^= 1;
+        if let Ok(p) = Proof::<Bls12_381>::from_bytes(&bad) {
+            assert!(!verify(&pk.vk, &circuit.public_inputs(), &p), "byte {i}");
+        }
+    }
+    assert!(Proof::<Bls12_381>::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+
+    let mut vk_bytes = Vec::new();
+    pk.vk.serialize_compressed(&mut vk_bytes).unwrap();
+    let vk = VerifierKey::<Bls12_381>::deserialize_compressed(&vk_bytes[..]).unwrap();
+    assert_eq!(vk, pk.vk);
+    assert!(verify(&vk, &circuit.public_inputs(), &proof));
+}
