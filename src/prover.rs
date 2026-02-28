@@ -58,12 +58,18 @@ impl<F: Field> Witness<F> {
 }
 
 /// Interpolate evaluations over the domain.
-pub fn interpolate<F: FftField>(domain: &Radix2EvaluationDomain<F>, evals: &[F]) -> DensePolynomial<F> {
+pub fn interpolate<F: FftField>(
+    domain: &Radix2EvaluationDomain<F>,
+    evals: &[F],
+) -> DensePolynomial<F> {
     DensePolynomial::from_coefficients_vec(domain.ifft(evals))
 }
 
 /// `p(X * omega)`
-pub fn shift<F: FftField>(domain: &Radix2EvaluationDomain<F>, p: &DensePolynomial<F>) -> DensePolynomial<F> {
+pub fn shift<F: FftField>(
+    domain: &Radix2EvaluationDomain<F>,
+    p: &DensePolynomial<F>,
+) -> DensePolynomial<F> {
     let omega = domain.group_gen();
     let mut pow = F::one();
     let coeffs = p
@@ -86,7 +92,10 @@ pub fn lagrange_first<F: FftField>(domain: &Radix2EvaluationDomain<F>) -> DenseP
 }
 
 /// `PI(X) = -sum_i x_i L_i(X)`
-pub fn public_input_poly<F: FftField>(domain: &Radix2EvaluationDomain<F>, inputs: &[F]) -> DensePolynomial<F> {
+pub fn public_input_poly<F: FftField>(
+    domain: &Radix2EvaluationDomain<F>,
+    inputs: &[F],
+) -> DensePolynomial<F> {
     let mut evals = vec![F::zero(); domain.size()];
     for (e, x) in evals.iter_mut().zip(inputs) {
         *e = -*x;
@@ -190,7 +199,13 @@ pub fn quotient<E: Pairing, R: RngCore>(
     let ev = |p: &DensePolynomial<E::ScalarField>| coset.fft(&p.coeffs);
 
     let [a, b, c] = [ev(&wires[0]), ev(&wires[1]), ev(&wires[2])];
-    let [q_l, q_r, q_o, q_m, q_c] = [ev(&pk.q_l), ev(&pk.q_r), ev(&pk.q_o), ev(&pk.q_m), ev(&pk.q_c)];
+    let [q_l, q_r, q_o, q_m, q_c] = [
+        ev(&pk.q_l),
+        ev(&pk.q_r),
+        ev(&pk.q_o),
+        ev(&pk.q_m),
+        ev(&pk.q_c),
+    ];
     let [s1, s2, s3] = [ev(&pk.s_sigma[0]), ev(&pk.s_sigma[1]), ev(&pk.s_sigma[2])];
     let pi = ev(pi);
     let l1 = ev(&lagrange_first(&pk.domain));
@@ -206,9 +221,14 @@ pub fn quotient<E: Pairing, R: RngCore>(
     let mut t = Vec::with_capacity(m);
     for i in 0..m {
         let x = xs[i];
-        let gate = a[i] * b[i] * q_m[i] + a[i] * q_l[i] + b[i] * q_r[i] + c[i] * q_o[i] + q_c[i] + pi[i];
-        let f = (a[i] + beta * x + gamma) * (b[i] + beta * pk.k1 * x + gamma) * (c[i] + beta * pk.k2 * x + gamma);
-        let g = (a[i] + beta * s1[i] + gamma) * (b[i] + beta * s2[i] + gamma) * (c[i] + beta * s3[i] + gamma);
+        let gate =
+            a[i] * b[i] * q_m[i] + a[i] * q_l[i] + b[i] * q_r[i] + c[i] * q_o[i] + q_c[i] + pi[i];
+        let f = (a[i] + beta * x + gamma)
+            * (b[i] + beta * pk.k1 * x + gamma)
+            * (c[i] + beta * pk.k2 * x + gamma);
+        let g = (a[i] + beta * s1[i] + gamma)
+            * (b[i] + beta * s2[i] + gamma)
+            * (c[i] + beta * s3[i] + gamma);
         let perm = f * zz[i] - g * z_w(i);
         let start = (zz[i] - one) * l1[i];
         let z_h = pk.domain.evaluate_vanishing_polynomial(x);
@@ -266,10 +286,13 @@ pub fn linearisation<E: Pairing>(
     let l1 = z_h / (E::ScalarField::from(n) * (zeta - one));
     let konst = |k: E::ScalarField| DensePolynomial::from_coefficients_vec(vec![k]);
 
-    let gate = &(&(&(&(&pk.q_m * (ev.a * ev.b)) + &(&pk.q_l * ev.a)) + &(&pk.q_r * ev.b)) + &(&pk.q_o * ev.c))
+    let gate = &(&(&(&(&pk.q_m * (ev.a * ev.b)) + &(&pk.q_l * ev.a)) + &(&pk.q_r * ev.b))
+        + &(&pk.q_o * ev.c))
         + &(&pk.q_c + &konst(pi_at_zeta));
 
-    let f = (ev.a + beta * zeta + gamma) * (ev.b + beta * pk.k1 * zeta + gamma) * (ev.c + beta * pk.k2 * zeta + gamma);
+    let f = (ev.a + beta * zeta + gamma)
+        * (ev.b + beta * pk.k1 * zeta + gamma)
+        * (ev.c + beta * pk.k2 * zeta + gamma);
     let g_partial = (ev.a + beta * ev.s_sigma1 + gamma) * (ev.b + beta * ev.s_sigma2 + gamma);
     // g = g_partial * (c + beta S_sigma3(X) + gamma)
     let g = &(&pk.s_sigma[2] * (g_partial * beta)) + &konst(g_partial * (ev.c + gamma));
@@ -345,7 +368,17 @@ pub fn prove<E: Pairing, R: RngCore>(
 
     // round 5
     let v = transcript.challenge(b"v");
-    let r = linearisation(pk, &z, &t, &evals, pi.evaluate(&zeta), beta, gamma, alpha, zeta);
+    let r = linearisation(
+        pk,
+        &z,
+        &t,
+        &evals,
+        pi.evaluate(&zeta),
+        beta,
+        gamma,
+        alpha,
+        zeta,
+    );
     let (values, w_zeta) = srs.open_batch(&[&r, a, b, c, &pk.s_sigma[0], &pk.s_sigma[1]], zeta, v);
     debug_assert!(values[0].is_zero(), "r(zeta) != 0");
     let (_, w_zeta_omega) = srs.open(&z, zeta * omega);
@@ -407,7 +440,10 @@ mod tests {
             let den = (w.a[i] + beta * perm[i] + gamma)
                 * (w.b[i] + beta * perm[n + i] + gamma)
                 * (w.c[i] + beta * perm[2 * n + i] + gamma);
-            assert_eq!(z.evaluate(&(x * pk.domain.group_gen())) * den, z.evaluate(&x) * num);
+            assert_eq!(
+                z.evaluate(&(x * pk.domain.group_gen())) * den,
+                z.evaluate(&x) * num
+            );
         }
     }
 
@@ -431,7 +467,10 @@ mod tests {
         let domain = Radix2EvaluationDomain::<Fr>::new(16).unwrap();
         let p = DensePolynomial::<Fr>::rand(20, &mut rng);
         let x = Fr::rand(&mut rng);
-        assert_eq!(shift(&domain, &p).evaluate(&x), p.evaluate(&(x * domain.group_gen())));
+        assert_eq!(
+            shift(&domain, &p).evaluate(&x),
+            p.evaluate(&(x * domain.group_gen()))
+        );
     }
 
     #[test]
@@ -446,7 +485,8 @@ mod tests {
         let wires = wire_polys(&pk, &w, &mut rng);
         let z = accumulator(&pk, &w, beta, gamma, &mut rng);
         let pi = public_input_poly(&pk.domain, &c.public_inputs());
-        let [t_lo, t_mid, t_hi] = quotient(&pk, &wires, &z, &pi, beta, gamma, alpha, &mut rng).unwrap();
+        let [t_lo, t_mid, t_hi] =
+            quotient(&pk, &wires, &z, &pi, beta, gamma, alpha, &mut rng).unwrap();
         assert!(t_lo.degree() <= n && t_mid.degree() <= n && t_hi.degree() < n + 6);
 
         // reassemble and spot-check the identity at a random point
@@ -462,7 +502,9 @@ mod tests {
             + c * pk.q_o.evaluate(&zeta)
             + pk.q_c.evaluate(&zeta)
             + pi.evaluate(&zeta);
-        let f = (a + beta * zeta + gamma) * (b + beta * pk.k1 * zeta + gamma) * (c + beta * pk.k2 * zeta + gamma);
+        let f = (a + beta * zeta + gamma)
+            * (b + beta * pk.k1 * zeta + gamma)
+            * (c + beta * pk.k2 * zeta + gamma);
         let g = (a + beta * s1 + gamma) * (b + beta * s2 + gamma) * (c + beta * s3 + gamma);
         let zz = z.evaluate(&zeta);
         let zw = z.evaluate(&(zeta * pk.domain.group_gen()));

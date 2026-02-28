@@ -48,7 +48,16 @@ impl<F: Field> Circuit<F> {
             public_inputs: Vec::new(),
         };
         // 1 * zero + 0 = 0
-        c.gate(Self::ZERO, Self::ZERO, Self::ZERO, F::one(), F::zero(), F::zero(), F::zero(), F::zero());
+        c.gate(
+            Self::ZERO,
+            Self::ZERO,
+            Self::ZERO,
+            F::one(),
+            F::zero(),
+            F::zero(),
+            F::zero(),
+            F::zero(),
+        );
         c
     }
 
@@ -86,11 +95,30 @@ impl<F: Field> Circuit<F> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn gate(&mut self, a: Variable, b: Variable, c: Variable, q_l: F, q_r: F, q_o: F, q_m: F, q_c: F) {
+    pub fn gate(
+        &mut self,
+        a: Variable,
+        b: Variable,
+        c: Variable,
+        q_l: F,
+        q_r: F,
+        q_o: F,
+        q_m: F,
+        q_c: F,
+    ) {
         for v in [a, b, c] {
             assert!(v.0 < self.values.len(), "unknown variable {:?}", v);
         }
-        self.gates.push(Gate { a, b, c, q_l, q_r, q_o, q_m, q_c });
+        self.gates.push(Gate {
+            a,
+            b,
+            c,
+            q_l,
+            q_r,
+            q_o,
+            q_m,
+            q_c,
+        });
     }
 
     /// Declare a public input. Its gate is placed before all other gates so
@@ -119,7 +147,16 @@ impl<F: Field> Circuit<F> {
     pub fn constant(&mut self, k: F) -> Variable {
         let v = self.alloc(k);
         // v - k = 0
-        self.gate(v, Self::ZERO, Self::ZERO, F::one(), F::zero(), F::zero(), F::zero(), -k);
+        self.gate(
+            v,
+            Self::ZERO,
+            Self::ZERO,
+            F::one(),
+            F::zero(),
+            F::zero(),
+            F::zero(),
+            -k,
+        );
         v
     }
 
@@ -133,13 +170,31 @@ impl<F: Field> Circuit<F> {
     pub fn mul(&mut self, x: Variable, y: Variable) -> Variable {
         let z = self.alloc(self.value(x) * self.value(y));
         // x * y - z = 0
-        self.gate(x, y, z, F::zero(), F::zero(), -F::one(), F::one(), F::zero());
+        self.gate(
+            x,
+            y,
+            z,
+            F::zero(),
+            F::zero(),
+            -F::one(),
+            F::one(),
+            F::zero(),
+        );
         z
     }
 
     pub fn assert_equal(&mut self, x: Variable, y: Variable) {
         // x - y = 0
-        self.gate(x, y, Self::ZERO, F::one(), -F::one(), F::zero(), F::zero(), F::zero());
+        self.gate(
+            x,
+            y,
+            Self::ZERO,
+            F::one(),
+            -F::one(),
+            F::zero(),
+            F::zero(),
+            F::zero(),
+        );
     }
 
     /// Check every gate against the current assignment. Useful in tests; the

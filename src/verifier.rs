@@ -1,13 +1,17 @@
 //! The verifier, following section 8.4 of the paper.
 
-use crate::kzg::Commitment;
+use crate::kzg::{Commitment, Opening};
 use crate::preprocess::VerifierKey;
 use crate::proof::Proof;
 use ark_ec::{pairing::Pairing, CurveGroup};
 use ark_ff::{Field, One, Zero};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 
-pub fn verify<E: Pairing>(vk: &VerifierKey<E>, public_inputs: &[E::ScalarField], proof: &Proof<E>) -> bool {
+pub fn verify<E: Pairing>(
+    vk: &VerifierKey<E>,
+    public_inputs: &[E::ScalarField],
+    proof: &Proof<E>,
+) -> bool {
     if public_inputs.len() != vk.num_public_inputs {
         return false;
     }
@@ -61,7 +65,9 @@ pub fn verify<E: Pairing>(vk: &VerifierKey<E>, public_inputs: &[E::ScalarField],
 
     // r(X) = r_0 + (linear combination of committed polynomials). The
     // constant part is computed here, the rest as a commitment [D].
-    let f = (ev.a + beta * zeta + gamma) * (ev.b + beta * vk.k1 * zeta + gamma) * (ev.c + beta * vk.k2 * zeta + gamma);
+    let f = (ev.a + beta * zeta + gamma)
+        * (ev.b + beta * vk.k1 * zeta + gamma)
+        * (ev.c + beta * vk.k2 * zeta + gamma);
     let g_partial = (ev.a + beta * ev.s_sigma1 + gamma) * (ev.b + beta * ev.s_sigma2 + gamma);
     let r0 = pi - l1 * alpha * alpha - alpha * g_partial * (ev.c + gamma) * ev.z_omega;
 
@@ -80,14 +86,29 @@ pub fn verify<E: Pairing>(vk: &VerifierKey<E>, public_inputs: &[E::ScalarField],
     let v3 = v2 * v;
     let v4 = v3 * v;
     let v5 = v4 * v;
-    let folded_comm = d + proof.a.0 * v + proof.b.0 * v2 + proof.c.0 * v3 + vk.s_sigma[0].0 * v4 + vk.s_sigma[1].0 * v5;
+    let folded_comm = d
+        + proof.a.0 * v
+        + proof.b.0 * v2
+        + proof.c.0 * v3
+        + vk.s_sigma[0].0 * v4
+        + vk.s_sigma[1].0 * v5;
     // r(zeta) = 0, i.e. D(zeta) = -r_0
     let folded_value = -r0 + v * ev.a + v2 * ev.b + v3 * ev.c + v4 * ev.s_sigma1 + v5 * ev.s_sigma2;
 
     vk.kzg.verify_multi_point(
         &[
-            (Commitment(folded_comm.into_affine()), zeta, folded_value, proof.w_zeta),
-            (proof.z, zeta * omega, ev.z_omega, proof.w_zeta_omega),
+            Opening {
+                comm: Commitment(folded_comm.into_affine()),
+                point: zeta,
+                value: folded_value,
+                proof: proof.w_zeta,
+            },
+            Opening {
+                comm: proof.z,
+                point: zeta * omega,
+                value: ev.z_omega,
+                proof: proof.w_zeta_omega,
+            },
         ],
         u,
     )

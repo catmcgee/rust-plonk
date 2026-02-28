@@ -45,7 +45,10 @@ fn unsatisfied_circuit_cannot_prove() {
     let circuit = cubic(3, 36);
     assert!(!circuit.is_satisfied());
     let pk = preprocess(&circuit, &srs);
-    assert_eq!(prove(&srs, &pk, &circuit, &mut rng).err(), Some(ProveError::Unsatisfied));
+    assert_eq!(
+        prove(&srs, &pk, &circuit, &mut rng).err(),
+        Some(ProveError::Unsatisfied)
+    );
 }
 
 #[test]

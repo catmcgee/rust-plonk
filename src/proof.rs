@@ -7,7 +7,9 @@
 
 use crate::kzg::{self, Commitment};
 use ark_ec::pairing::Pairing;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Validate};
+use ark_serialize::{
+    CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Validate,
+};
 
 /// The evaluations the verifier needs. Everything else is folded into the
 /// linearisation polynomial `r(X)`, which the verifier reconstructs as a
@@ -41,7 +43,8 @@ pub struct Proof<E: Pairing> {
 impl<E: Pairing> Proof<E> {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.serialized_size(Compress::Yes));
-        self.serialize_compressed(&mut buf).expect("writing to a Vec");
+        self.serialize_compressed(&mut buf)
+            .expect("writing to a Vec");
         buf
     }
 

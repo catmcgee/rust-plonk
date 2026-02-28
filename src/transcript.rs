@@ -41,7 +41,10 @@ impl Transcript {
 
     pub fn challenge<F: PrimeField>(&mut self, label: &[u8]) -> F {
         self.absorb_bytes(b"challenge", label);
-        let wide = Sha512::new().chain_update(b"squeeze").chain_update(self.state).finalize();
+        let wide = Sha512::new()
+            .chain_update(b"squeeze")
+            .chain_update(self.state)
+            .finalize();
         F::from_le_bytes_mod_order(&wide)
     }
 }

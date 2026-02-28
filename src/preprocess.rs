@@ -5,7 +5,9 @@ use crate::kzg::{self, Commitment, Srs};
 use crate::permutation::{coset_generators, Permutation};
 use crate::transcript::Transcript;
 use ark_ec::pairing::Pairing;
-use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, Radix2EvaluationDomain};
+use ark_poly::{
+    univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, Radix2EvaluationDomain,
+};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 #[derive(Clone, Debug)]
@@ -116,7 +118,11 @@ pub fn preprocess<E: Pairing>(circuit: &Circuit<E::ScalarField>, srs: &Srs<E>) -
         q_o: srs.commit(&q_o),
         q_m: srs.commit(&q_m),
         q_c: srs.commit(&q_c),
-        s_sigma: [srs.commit(&s_sigma[0]), srs.commit(&s_sigma[1]), srs.commit(&s_sigma[2])],
+        s_sigma: [
+            srs.commit(&s_sigma[0]),
+            srs.commit(&s_sigma[1]),
+            srs.commit(&s_sigma[2]),
+        ],
         num_public_inputs: circuit.num_public_inputs(),
         kzg: srs.verifier_key(),
     };

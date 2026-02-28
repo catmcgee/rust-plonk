@@ -7,7 +7,9 @@
 
 use crate::circuit::{Circuit, Variable};
 use ark_ff::{FftField, Field};
-use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, Radix2EvaluationDomain};
+use ark_poly::{
+    univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, Radix2EvaluationDomain,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Permutation {

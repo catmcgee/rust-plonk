@@ -3,7 +3,10 @@
 //! The setup is a plain powers-of-tau with the secret sampled locally, which is
 //! only fine for tests. A real deployment needs an MPC ceremony.
 
-use ark_ec::{pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, AffineRepr, CurveGroup, PrimeGroup};
+use ark_ec::{
+    pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, AffineRepr, CurveGroup,
+    PrimeGroup,
+};
 use ark_ff::{Field, One, PrimeField, UniformRand, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -31,6 +34,14 @@ pub struct Commitment<E: Pairing>(pub E::G1Affine);
 /// Witness `[(p(X) - p(z)) / (X - z)]_1` for an evaluation at `z`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct Proof<E: Pairing>(pub E::G1Affine);
+
+/// A claimed opening: commitment, point, value, proof.
+pub struct Opening<E: Pairing> {
+    pub comm: Commitment<E>,
+    pub point: E::ScalarField,
+    pub value: E::ScalarField,
+    pub proof: Proof<E>,
+}
 
 impl<E: Pairing> Srs<E> {
     /// Sample a fresh `tau` and compute powers up to `max_degree`, over the
@@ -133,7 +144,9 @@ impl<E: Pairing> VerifierKey<E> {
         // e(C - v*G + z*W, H) * e(-W, tau*H) == 1
         let lhs = comm.0.into_group() - self.g * value + proof.0 * z;
         let rhs = -proof.0.into_group();
-        E::multi_pairing([lhs, rhs], [self.h, self.tau_h]).0.is_one()
+        E::multi_pairing([lhs, rhs], [self.h, self.tau_h])
+            .0
+            .is_one()
     }
 
     /// Counterpart of [`Srs::open_batch`]: fold commitments and values with
@@ -157,7 +170,12 @@ impl<E: Pairing> VerifierKey<E> {
             folded_value += *v * coeff;
             coeff *= gamma;
         }
-        self.verify(&Commitment(folded_comm.into_affine()), z, folded_value, proof)
+        self.verify(
+            &Commitment(folded_comm.into_affine()),
+            z,
+            folded_value,
+            proof,
+        )
     }
 
     /// Check several openings, possibly at different points, with one pairing
@@ -168,20 +186,18 @@ impl<E: Pairing> VerifierKey<E> {
     /// ```text
     /// e(sum u^i (C_i - v_i G + z_i W_i), H) = e(sum u^i W_i, tau H)
     /// ```
-    pub fn verify_multi_point(
-        &self,
-        openings: &[(Commitment<E>, E::ScalarField, E::ScalarField, Proof<E>)],
-        u: E::ScalarField,
-    ) -> bool {
+    pub fn verify_multi_point(&self, openings: &[Opening<E>], u: E::ScalarField) -> bool {
         let mut lhs = E::G1::zero();
         let mut ws = E::G1::zero();
         let mut coeff = E::ScalarField::one();
-        for (c, z, v, w) in openings {
-            lhs += (c.0.into_group() - self.g * v + w.0 * z) * coeff;
-            ws += w.0 * coeff;
+        for o in openings {
+            lhs += (o.comm.0.into_group() - self.g * o.value + o.proof.0 * o.point) * coeff;
+            ws += o.proof.0 * coeff;
             coeff *= u;
         }
-        E::multi_pairing([lhs, -ws], [self.h, self.tau_h]).0.is_one()
+        E::multi_pairing([lhs, -ws], [self.h, self.tau_h])
+            .0
+            .is_one()
     }
 }
 
@@ -282,10 +298,16 @@ mod tests {
         let (vp, wp) = srs.open(&p, z1);
         let (vq, wq) = srs.open(&q, z2);
         let u = Fr::rand(&mut rng);
-        assert!(vk.verify_multi_point(&[(cp, z1, vp, wp), (cq, z2, vq, wq)], u));
-        assert!(!vk.verify_multi_point(&[(cp, z1, vp, wp), (cq, z2, vq + Fr::one(), wq)], u));
-        assert!(!vk.verify_multi_point(&[(cp, z1, vp, wq), (cq, z2, vq, wp)], u));
-        assert!(!vk.verify_multi_point(&[(cp, z2, vp, wp), (cq, z1, vq, wq)], u));
+        let op = |comm, point, value, proof| Opening {
+            comm,
+            point,
+            value,
+            proof,
+        };
+        assert!(vk.verify_multi_point(&[op(cp, z1, vp, wp), op(cq, z2, vq, wq)], u));
+        assert!(!vk.verify_multi_point(&[op(cp, z1, vp, wp), op(cq, z2, vq + Fr::one(), wq)], u));
+        assert!(!vk.verify_multi_point(&[op(cp, z1, vp, wq), op(cq, z2, vq, wp)], u));
+        assert!(!vk.verify_multi_point(&[op(cp, z2, vp, wp), op(cq, z1, vq, wq)], u));
     }
 
     #[test]
