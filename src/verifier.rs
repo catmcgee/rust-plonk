@@ -7,6 +7,25 @@ use ark_ec::{pairing::Pairing, CurveGroup};
 use ark_ff::{Field, One, Zero};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 
+/// `L_0(zeta), ..., L_{count-1}(zeta)` with one batch inversion.
+/// `zeta` must not be in the domain.
+fn lagrange_at<F: ark_ff::FftField>(
+    domain: &Radix2EvaluationDomain<F>,
+    zeta: F,
+    count: usize,
+) -> Vec<F> {
+    let n = domain.size() as u64;
+    let z_h = zeta.pow([n]) - F::one();
+    let n_inv = F::from(n).inverse().expect("n is nonzero");
+    let mut denoms: Vec<F> = (0..count).map(|i| zeta - domain.element(i)).collect();
+    ark_ff::batch_inversion(&mut denoms);
+    denoms
+        .iter()
+        .enumerate()
+        .map(|(i, d)| domain.element(i) * z_h * n_inv * d)
+        .collect()
+}
+
 pub fn verify<E: Pairing>(
     vk: &VerifierKey<E>,
     public_inputs: &[E::ScalarField],
@@ -53,10 +72,11 @@ pub fn verify<E: Pairing>(
     if z_h.is_zero() {
         return false;
     }
-    // L_1(zeta) = (zeta^n - 1) / (n (zeta - 1))
-    let l1 = z_h / (E::ScalarField::from(n as u64) * (zeta - one));
+    // L_i(zeta) = omega^i (zeta^n - 1) / (n (zeta - omega^i)), only for the
+    // first l rows, so the verifier stays O(l) rather than O(n).
+    let lagrange = lagrange_at(&domain, zeta, public_inputs.len().max(1));
+    let l1 = lagrange[0];
     // PI(zeta) = -sum x_i L_i(zeta)
-    let lagrange = domain.evaluate_all_lagrange_coefficients(zeta);
     let pi: E::ScalarField = -public_inputs
         .iter()
         .zip(&lagrange)
@@ -112,4 +132,22 @@ pub fn verify<E: Pairing>(
         ],
         u,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_bls12_381::Fr;
+    use ark_ff::UniformRand;
+    use ark_std::test_rng;
+
+    #[test]
+    fn lagrange_matches_arkworks() {
+        let mut rng = test_rng();
+        let domain = Radix2EvaluationDomain::<Fr>::new(16).unwrap();
+        let zeta = Fr::rand(&mut rng);
+        let all = domain.evaluate_all_lagrange_coefficients(zeta);
+        assert_eq!(lagrange_at(&domain, zeta, 5), all[..5]);
+        assert_eq!(lagrange_at(&domain, zeta, 16), all);
+    }
 }
