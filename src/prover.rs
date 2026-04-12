@@ -19,6 +19,8 @@ pub enum ProveError {
     Unsatisfied,
     /// The circuit declares a different number of public inputs than the key.
     PublicInputCount { expected: usize, got: usize },
+    /// More gates than the key's domain has rows.
+    TooManyGates { max: usize, got: usize },
 }
 
 impl fmt::Display for ProveError {
@@ -27,6 +29,9 @@ impl fmt::Display for ProveError {
             ProveError::Unsatisfied => write!(f, "witness does not satisfy the circuit"),
             ProveError::PublicInputCount { expected, got } => {
                 write!(f, "circuit has {got} public inputs, key expects {expected}")
+            }
+            ProveError::TooManyGates { max, got } => {
+                write!(f, "circuit has {got} gates, key supports at most {max}")
             }
         }
     }
@@ -139,7 +144,7 @@ pub fn accumulator<E: Pairing, R: RngCore>(
     beta: E::ScalarField,
     gamma: E::ScalarField,
     rng: &mut R,
-) -> DensePolynomial<E::ScalarField> {
+) -> Result<DensePolynomial<E::ScalarField>, ProveError> {
     let n = pk.domain.size();
     let (id, perm) = pk.permutation.labels(&pk.domain, pk.k1, pk.k2);
 
@@ -155,9 +160,12 @@ pub fn accumulator<E: Pairing, R: RngCore>(
             * (w.c[i] + beta * perm[2 * n + i] + gamma);
         acc *= num * den.inverse().expect("gamma collided with a wire value");
     }
-    // If the copy constraints don't hold, `acc` isn't 1 here. Don't check:
-    // the quotient computation will fail to divide and report it properly.
-    blind(&pk.domain, interpolate(&pk.domain, &evals), 2, rng)
+    // The product over all rows is 1 exactly when the wires respect the
+    // copy constraints (up to a gamma collision).
+    if !acc.is_one() {
+        return Err(ProveError::Unsatisfied);
+    }
+    Ok(blind(&pk.domain, interpolate(&pk.domain, &evals), 2, rng))
 }
 
 /// Round 3: the quotient `t(X)`, split into three pieces of degree < n.
@@ -236,8 +244,12 @@ pub fn quotient<E: Pairing, R: RngCore>(
     }
     let mut coeffs = coset.ifft(&t);
     // If the constraints hold the numerator is divisible by Z_H and t has
-    // degree at most 3n+5. If they don't, the division leaves junk in the
-    // high coefficients, which is how we detect a bad witness.
+    // degree at most 3n+5. If they don't, the pointwise division gives some
+    // other polynomial of degree < 4n, which usually shows up as nonzero high
+    // coefficients. Not always though: on the coset 1/Z_H is
+    // (1 + X^n + X^2n + X^3n)/(g^4n - 1), so a remainder R of degree < 6
+    // hides entirely under t's top coefficients. That's why `prove` checks
+    // satisfiability up front; this is just a backstop.
     let tail = coeffs.split_off(3 * n + 6);
     if !tail.iter().all(|c| c.is_zero()) {
         return Err(ProveError::Unsatisfied);
@@ -320,6 +332,18 @@ pub fn prove<E: Pairing, R: RngCore>(
             got: circuit.num_public_inputs(),
         });
     }
+    if circuit.num_gates() > n {
+        return Err(ProveError::TooManyGates {
+            max: n,
+            got: circuit.num_gates(),
+        });
+    }
+    // Gate by gate check now; the copy constraints are checked when the
+    // accumulator is built. Cheaper and more reliable than trying to infer
+    // it from the quotient computation.
+    if !circuit.is_satisfied() {
+        return Err(ProveError::Unsatisfied);
+    }
     let public_inputs = circuit.public_inputs();
 
     let mut transcript = pk.vk.transcript(&public_inputs);
@@ -335,7 +359,7 @@ pub fn prove<E: Pairing, R: RngCore>(
     // round 2
     let beta = transcript.challenge(b"beta");
     let gamma = transcript.challenge(b"gamma");
-    let z = accumulator(pk, &w, beta, gamma, rng);
+    let z = accumulator(pk, &w, beta, gamma, rng)?;
     let cz = srs.commit(&z);
     transcript.absorb(b"z", &cz.0);
 
@@ -380,7 +404,10 @@ pub fn prove<E: Pairing, R: RngCore>(
         zeta,
     );
     let (values, w_zeta) = srs.open_batch(&[&r, a, b, c, &pk.s_sigma[0], &pk.s_sigma[1]], zeta, v);
-    debug_assert!(values[0].is_zero(), "r(zeta) != 0");
+    if !values[0].is_zero() {
+        // Can't happen if the checks above passed; refuse to emit garbage.
+        return Err(ProveError::Unsatisfied);
+    }
     let (_, w_zeta_omega) = srs.open(&z, zeta * omega);
 
     Ok(Proof {
@@ -427,7 +454,7 @@ mod tests {
         let pk = preprocess(&c, &srs);
         let w = Witness::from_circuit(&c, pk.domain.size());
         let (beta, gamma) = (Fr::rand(&mut rng), Fr::rand(&mut rng));
-        let z = accumulator(&pk, &w, beta, gamma, &mut rng);
+        let z = accumulator(&pk, &w, beta, gamma, &mut rng).unwrap();
         assert_eq!(z.evaluate(&Fr::one()), Fr::one());
         // z(omega^n) = z(1) = 1 is the wrap-around; check the recurrence too
         let n = pk.domain.size();
@@ -483,7 +510,7 @@ mod tests {
         let w = Witness::from_circuit(&c, n);
         let (beta, gamma, alpha) = (Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng));
         let wires = wire_polys(&pk, &w, &mut rng);
-        let z = accumulator(&pk, &w, beta, gamma, &mut rng);
+        let z = accumulator(&pk, &w, beta, gamma, &mut rng).unwrap();
         let pi = public_input_poly(&pk.domain, &c.public_inputs());
         let [t_lo, t_mid, t_hi] =
             quotient(&pk, &wires, &z, &pi, beta, gamma, alpha, &mut rng).unwrap();
@@ -527,7 +554,7 @@ mod tests {
         let w = Witness::from_circuit(&c, pk.domain.size());
         let (beta, gamma, alpha) = (Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng));
         let wires = wire_polys(&pk, &w, &mut rng);
-        let z = accumulator(&pk, &w, beta, gamma, &mut rng);
+        let z = accumulator(&pk, &w, beta, gamma, &mut rng).unwrap();
         let pi = public_input_poly(&pk.domain, &[]);
         assert_eq!(
             quotient(&pk, &wires, &z, &pi, beta, gamma, alpha, &mut rng).err(),

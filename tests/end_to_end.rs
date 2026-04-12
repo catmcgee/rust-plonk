@@ -189,3 +189,31 @@ fn proof_round_trips_through_bytes() {
     assert_eq!(vk, pk.vk);
     assert!(verify(&vk, &circuit.public_inputs(), &proof));
 }
+
+/// Violations that form a low-degree polynomial over the domain used to slip
+/// past the prover's divisibility check: row i off by omega^i - 1 means the
+/// remainder is X - 1, and the check only looked at high coefficients.
+#[test]
+fn low_degree_violation_pattern_is_rejected() {
+    use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
+    let mut rng = test_rng();
+    let srs = Srs::<Bls12_381>::setup(64, &mut rng);
+    let domain = Radix2EvaluationDomain::<Fr>::new(8).unwrap();
+    // row 0 is the builtin zero gate, rows 1..8 are x_i = 5 with x_i off by omega^i - 1
+    let mut c = Circuit::<Fr>::new();
+    for i in 1..8 {
+        let x = c.alloc(Fr::from(5u64) + domain.element(i) - Fr::from(1u64));
+        c.assert_const(x, Fr::from(5u64));
+    }
+    assert_eq!(c.num_gates(), 8);
+    assert!(!c.is_satisfied());
+    let pk = preprocess(&c, &srs);
+    match prove(&srs, &pk, &c, &mut rng) {
+        Err(ProveError::Unsatisfied) => {}
+        Err(e) => panic!("unexpected error {e}"),
+        Ok(proof) => panic!(
+            "proof produced for a bad witness, verifies: {}",
+            verify(&pk.vk, &[], &proof)
+        ),
+    }
+}
