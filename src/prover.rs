@@ -89,13 +89,6 @@ pub fn shift<F: FftField>(
     DensePolynomial::from_coefficients_vec(coeffs)
 }
 
-/// `L_1(X)`: 1 at `omega^0`, 0 elsewhere on the domain.
-pub fn lagrange_first<F: FftField>(domain: &Radix2EvaluationDomain<F>) -> DensePolynomial<F> {
-    let mut evals = vec![F::zero(); domain.size()];
-    evals[0] = F::one();
-    interpolate(domain, &evals)
-}
-
 /// `PI(X) = -sum_i x_i L_i(X)`
 pub fn public_input_poly<F: FftField>(
     domain: &Radix2EvaluationDomain<F>,
@@ -146,19 +139,34 @@ pub fn accumulator<E: Pairing, R: RngCore>(
     rng: &mut R,
 ) -> Result<DensePolynomial<E::ScalarField>, ProveError> {
     let n = pk.domain.size();
-    let (id, perm) = pk.permutation.labels(&pk.domain, pk.k1, pk.k2);
+    let id = &pk.id_labels;
+    let [s1, s2, s3] = &pk.s_sigma;
+
+    let mut nums = Vec::with_capacity(n);
+    let mut dens = Vec::with_capacity(n);
+    for i in 0..n {
+        nums.push(
+            (w.a[i] + beta * id[i] + gamma)
+                * (w.b[i] + beta * id[n + i] + gamma)
+                * (w.c[i] + beta * id[2 * n + i] + gamma),
+        );
+        dens.push(
+            (w.a[i] + beta * s1.on_h[i] + gamma)
+                * (w.b[i] + beta * s2.on_h[i] + gamma)
+                * (w.c[i] + beta * s3.on_h[i] + gamma),
+        );
+    }
+    if dens.iter().any(|d| d.is_zero()) {
+        // gamma happened to cancel a wire value; astronomically unlikely
+        return Err(ProveError::Unsatisfied);
+    }
+    ark_ff::batch_inversion(&mut dens);
 
     let mut evals = Vec::with_capacity(n);
     let mut acc = E::ScalarField::one();
-    for i in 0..n {
+    for (num, den_inv) in nums.iter().zip(&dens) {
         evals.push(acc);
-        let num = (w.a[i] + beta * id[i] + gamma)
-            * (w.b[i] + beta * id[n + i] + gamma)
-            * (w.c[i] + beta * id[2 * n + i] + gamma);
-        let den = (w.a[i] + beta * perm[i] + gamma)
-            * (w.b[i] + beta * perm[n + i] + gamma)
-            * (w.c[i] + beta * perm[2 * n + i] + gamma);
-        acc *= num * den.inverse().expect("gamma collided with a wire value");
+        acc *= *num * den_inv;
     }
     // The product over all rows is 1 exactly when the wires respect the
     // copy constraints (up to a gamma collision).
@@ -199,26 +207,17 @@ pub fn quotient<E: Pairing, R: RngCore>(
 ) -> Result<[DensePolynomial<E::ScalarField>; 3], ProveError> {
     let n = pk.domain.size();
     assert!(n >= crate::preprocess::MIN_DOMAIN_SIZE);
-    let coset = Radix2EvaluationDomain::<E::ScalarField>::new(4 * n)
-        .expect("no domain of size 4n")
-        .get_coset(E::ScalarField::GENERATOR)
-        .expect("generator is not in the domain");
+    let coset = &pk.coset;
     let m = coset.size();
     let ev = |p: &DensePolynomial<E::ScalarField>| coset.fft(&p.coeffs);
 
     let [a, b, c] = [ev(&wires[0]), ev(&wires[1]), ev(&wires[2])];
-    let [q_l, q_r, q_o, q_m, q_c] = [
-        ev(&pk.q_l),
-        ev(&pk.q_r),
-        ev(&pk.q_o),
-        ev(&pk.q_m),
-        ev(&pk.q_c),
-    ];
-    let [s1, s2, s3] = [ev(&pk.s_sigma[0]), ev(&pk.s_sigma[1]), ev(&pk.s_sigma[2])];
+    let [q_l, q_r, q_o, q_m, q_c] = pk.selectors.each_ref().map(|q| &q.on_coset);
+    let [s1, s2, s3] = pk.s_sigma.each_ref().map(|s| &s.on_coset);
     let pi = ev(pi);
-    let l1 = ev(&lagrange_first(&pk.domain));
+    let l1 = &pk.l1.on_coset;
     let zz = ev(z);
-    let xs: Vec<E::ScalarField> = coset.elements().collect();
+    let xs = &pk.coset_points;
 
     // The 4n-th root of unity to the 4th is omega, so z(X omega) on the
     // coset is z(X) rotated by four positions.
@@ -239,8 +238,7 @@ pub fn quotient<E: Pairing, R: RngCore>(
             * (c[i] + beta * s3[i] + gamma);
         let perm = f * zz[i] - g * z_w(i);
         let start = (zz[i] - one) * l1[i];
-        let z_h = pk.domain.evaluate_vanishing_polynomial(x);
-        t.push((gate + alpha * perm + alpha2 * start) / z_h);
+        t.push((gate + alpha * perm + alpha2 * start) * pk.z_h_inv_coset[i % 4]);
     }
     let mut coeffs = coset.ifft(&t);
     // If the constraints hold the numerator is divisible by Z_H and t has
@@ -298,16 +296,16 @@ pub fn linearisation<E: Pairing>(
     let l1 = z_h / (E::ScalarField::from(n) * (zeta - one));
     let konst = |k: E::ScalarField| DensePolynomial::from_coefficients_vec(vec![k]);
 
-    let gate = &(&(&(&(&pk.q_m * (ev.a * ev.b)) + &(&pk.q_l * ev.a)) + &(&pk.q_r * ev.b))
-        + &(&pk.q_o * ev.c))
-        + &(&pk.q_c + &konst(pi_at_zeta));
+    let [q_l, q_r, q_o, q_m, q_c] = pk.selectors.each_ref().map(|q| &q.poly);
+    let gate = &(&(&(&(q_m * (ev.a * ev.b)) + &(q_l * ev.a)) + &(q_r * ev.b)) + &(q_o * ev.c))
+        + &(q_c + &konst(pi_at_zeta));
 
     let f = (ev.a + beta * zeta + gamma)
         * (ev.b + beta * pk.k1 * zeta + gamma)
         * (ev.c + beta * pk.k2 * zeta + gamma);
     let g_partial = (ev.a + beta * ev.s_sigma1 + gamma) * (ev.b + beta * ev.s_sigma2 + gamma);
     // g = g_partial * (c + beta S_sigma3(X) + gamma)
-    let g = &(&pk.s_sigma[2] * (g_partial * beta)) + &konst(g_partial * (ev.c + gamma));
+    let g = &(&pk.s_sigma[2].poly * (g_partial * beta)) + &konst(g_partial * (ev.c + gamma));
     let perm = &(z * f) - &(&g * ev.z_omega);
 
     let start = &(z - &konst(one)) * l1;
@@ -379,8 +377,8 @@ pub fn prove<E: Pairing, R: RngCore>(
         a: a.evaluate(&zeta),
         b: b.evaluate(&zeta),
         c: c.evaluate(&zeta),
-        s_sigma1: pk.s_sigma[0].evaluate(&zeta),
-        s_sigma2: pk.s_sigma[1].evaluate(&zeta),
+        s_sigma1: pk.s_sigma[0].poly.evaluate(&zeta),
+        s_sigma2: pk.s_sigma[1].poly.evaluate(&zeta),
         z_omega: z.evaluate(&(zeta * omega)),
     };
     transcript.absorb(b"a(zeta)", &evals.a);
@@ -403,7 +401,11 @@ pub fn prove<E: Pairing, R: RngCore>(
         alpha,
         zeta,
     );
-    let (values, w_zeta) = srs.open_batch(&[&r, a, b, c, &pk.s_sigma[0], &pk.s_sigma[1]], zeta, v);
+    let (values, w_zeta) = srs.open_batch(
+        &[&r, a, b, c, &pk.s_sigma[0].poly, &pk.s_sigma[1].poly],
+        zeta,
+        v,
+    );
     if !values[0].is_zero() {
         // Can't happen if the checks above passed; refuse to emit garbage.
         return Err(ProveError::Unsatisfied);
@@ -522,20 +524,16 @@ mod tests {
         let t = t_lo.evaluate(&zeta) + zn * t_mid.evaluate(&zeta) + zn * zn * t_hi.evaluate(&zeta);
         let zh = pk.domain.evaluate_vanishing_polynomial(zeta);
         let [a, b, c] = wires.map(|p| p.evaluate(&zeta));
-        let [s1, s2, s3] = [0, 1, 2].map(|i| pk.s_sigma[i].evaluate(&zeta));
-        let gate = a * b * pk.q_m.evaluate(&zeta)
-            + a * pk.q_l.evaluate(&zeta)
-            + b * pk.q_r.evaluate(&zeta)
-            + c * pk.q_o.evaluate(&zeta)
-            + pk.q_c.evaluate(&zeta)
-            + pi.evaluate(&zeta);
+        let [s1, s2, s3] = pk.s_sigma.each_ref().map(|s| s.poly.evaluate(&zeta));
+        let [q_l, q_r, q_o, q_m, q_c] = pk.selectors.each_ref().map(|q| q.poly.evaluate(&zeta));
+        let gate = a * b * q_m + a * q_l + b * q_r + c * q_o + q_c + pi.evaluate(&zeta);
         let f = (a + beta * zeta + gamma)
             * (b + beta * pk.k1 * zeta + gamma)
             * (c + beta * pk.k2 * zeta + gamma);
         let g = (a + beta * s1 + gamma) * (b + beta * s2 + gamma) * (c + beta * s3 + gamma);
         let zz = z.evaluate(&zeta);
         let zw = z.evaluate(&(zeta * pk.domain.group_gen()));
-        let l1 = lagrange_first(&pk.domain).evaluate(&zeta);
+        let l1 = pk.l1.poly.evaluate(&zeta);
         let lhs = gate + alpha * (f * zz - g * zw) + alpha * alpha * (zz - Fr::one()) * l1;
         assert_eq!(lhs, t * zh);
     }

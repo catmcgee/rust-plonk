@@ -5,22 +5,40 @@ use crate::kzg::{self, Commitment, Srs};
 use crate::permutation::{coset_generators, Permutation};
 use crate::transcript::Transcript;
 use ark_ec::pairing::Pairing;
+use ark_ff::{FftField, Field, One, Zero};
 use ark_poly::{
     univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, Radix2EvaluationDomain,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
+/// A polynomial fixed by the circuit, kept in every form the prover needs so
+/// nothing about the circuit is recomputed per proof.
+#[derive(Clone, Debug)]
+pub struct Fixed<F: FftField> {
+    pub poly: DensePolynomial<F>,
+    /// Evaluations over the domain `H`.
+    pub on_h: Vec<F>,
+    /// Evaluations over the 4n coset used for the quotient.
+    pub on_coset: Vec<F>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProverKey<E: Pairing> {
     pub domain: Radix2EvaluationDomain<E::ScalarField>,
+    /// Size 4n, shifted off `H` by the field's generator.
+    pub coset: Radix2EvaluationDomain<E::ScalarField>,
+    pub coset_points: Vec<E::ScalarField>,
+    /// `1 / Z_H(x)` for `x` on the coset. `x^n` only takes four values there
+    /// (`g^n` times a fourth root of unity), so it's indexed by `i % 4`.
+    pub z_h_inv_coset: [E::ScalarField; 4],
     pub k1: E::ScalarField,
     pub k2: E::ScalarField,
-    pub q_l: DensePolynomial<E::ScalarField>,
-    pub q_r: DensePolynomial<E::ScalarField>,
-    pub q_o: DensePolynomial<E::ScalarField>,
-    pub q_m: DensePolynomial<E::ScalarField>,
-    pub q_c: DensePolynomial<E::ScalarField>,
-    pub s_sigma: [DensePolynomial<E::ScalarField>; 3],
+    /// `q_l, q_r, q_o, q_m, q_c`
+    pub selectors: [Fixed<E::ScalarField>; 5],
+    pub s_sigma: [Fixed<E::ScalarField>; 3],
+    /// Identity labels `k_col * omega^row`, column-major.
+    pub id_labels: Vec<E::ScalarField>,
+    pub l1: Fixed<E::ScalarField>,
     pub permutation: Permutation,
     pub vk: VerifierKey<E>,
 }
@@ -84,44 +102,57 @@ pub fn preprocess<E: Pairing>(circuit: &Circuit<E::ScalarField>, srs: &Srs<E>) -
 
     let (k1, k2) = coset_generators(&domain);
 
-    let mut q_l = Vec::with_capacity(n);
-    let mut q_r = Vec::with_capacity(n);
-    let mut q_o = Vec::with_capacity(n);
-    let mut q_m = Vec::with_capacity(n);
-    let mut q_c = Vec::with_capacity(n);
-    for g in circuit.gates() {
-        q_l.push(g.q_l);
-        q_r.push(g.q_r);
-        q_o.push(g.q_o);
-        q_m.push(g.q_m);
-        q_c.push(g.q_c);
-    }
-    let interpolate = |mut evals: Vec<E::ScalarField>| {
-        evals.resize(n, E::ScalarField::from(0u64));
-        DensePolynomial::from_coefficients_vec(domain.ifft(&evals))
+    let coset = Radix2EvaluationDomain::<E::ScalarField>::new(4 * n)
+        .expect("no domain of size 4n")
+        .get_coset(E::ScalarField::GENERATOR)
+        .expect("generator is not in the domain");
+    let coset_points: Vec<E::ScalarField> = coset.elements().collect();
+    let z_h_inv_coset = [0, 1, 2, 3].map(|i| {
+        (coset_points[i].pow([n as u64]) - E::ScalarField::one())
+            .inverse()
+            .expect("Z_H doesn't vanish off H")
+    });
+
+    let fixed = |mut on_h: Vec<E::ScalarField>| {
+        on_h.resize(n, E::ScalarField::zero());
+        let poly = DensePolynomial::from_coefficients_vec(domain.ifft(&on_h));
+        let on_coset = coset.fft(&poly.coeffs);
+        Fixed {
+            poly,
+            on_h,
+            on_coset,
+        }
     };
-    let q_l = interpolate(q_l);
-    let q_r = interpolate(q_r);
-    let q_o = interpolate(q_o);
-    let q_m = interpolate(q_m);
-    let q_c = interpolate(q_c);
+
+    let mut columns: [Vec<E::ScalarField>; 5] = Default::default();
+    for g in circuit.gates() {
+        for (col, q) in columns.iter_mut().zip([g.q_l, g.q_r, g.q_o, g.q_m, g.q_c]) {
+            col.push(q);
+        }
+    }
+    let selectors = columns.map(fixed);
 
     let permutation = Permutation::from_circuit(circuit, n);
-    let s_sigma = permutation.sigma_polys(&domain, k1, k2);
+    let (id_labels, perm_labels) = permutation.labels(&domain, k1, k2);
+    let s_sigma = [0, 1, 2].map(|col| fixed(perm_labels[col * n..(col + 1) * n].to_vec()));
+
+    let mut l1_on_h = vec![E::ScalarField::zero(); n];
+    l1_on_h[0] = E::ScalarField::one();
+    let l1 = fixed(l1_on_h);
 
     let vk = VerifierKey {
         n,
         k1,
         k2,
-        q_l: srs.commit(&q_l),
-        q_r: srs.commit(&q_r),
-        q_o: srs.commit(&q_o),
-        q_m: srs.commit(&q_m),
-        q_c: srs.commit(&q_c),
+        q_l: srs.commit(&selectors[0].poly),
+        q_r: srs.commit(&selectors[1].poly),
+        q_o: srs.commit(&selectors[2].poly),
+        q_m: srs.commit(&selectors[3].poly),
+        q_c: srs.commit(&selectors[4].poly),
         s_sigma: [
-            srs.commit(&s_sigma[0]),
-            srs.commit(&s_sigma[1]),
-            srs.commit(&s_sigma[2]),
+            srs.commit(&s_sigma[0].poly),
+            srs.commit(&s_sigma[1].poly),
+            srs.commit(&s_sigma[2].poly),
         ],
         num_public_inputs: circuit.num_public_inputs(),
         kzg: srs.verifier_key(),
@@ -129,14 +160,15 @@ pub fn preprocess<E: Pairing>(circuit: &Circuit<E::ScalarField>, srs: &Srs<E>) -
 
     ProverKey {
         domain,
+        coset,
+        coset_points,
+        z_h_inv_coset,
         k1,
         k2,
-        q_l,
-        q_r,
-        q_o,
-        q_m,
-        q_c,
+        selectors,
         s_sigma,
+        id_labels,
+        l1,
         permutation,
         vk,
     }
@@ -146,7 +178,6 @@ pub fn preprocess<E: Pairing>(circuit: &Circuit<E::ScalarField>, srs: &Srs<E>) -
 mod tests {
     use super::*;
     use ark_bls12_381::{Bls12_381, Fr};
-    use ark_ff::Zero;
     use ark_poly::Polynomial;
     use ark_std::test_rng;
 
@@ -168,19 +199,31 @@ mod tests {
         let c = circuit(3, 4);
         let pk = preprocess(&c, &srs);
         assert_eq!(pk.vk.n, 8);
+        let [q_l, q_r, q_o, q_m, q_c] = &pk.selectors;
         for (i, g) in c.gates().iter().enumerate() {
             let w = pk.domain.element(i);
-            assert_eq!(pk.q_l.evaluate(&w), g.q_l);
-            assert_eq!(pk.q_r.evaluate(&w), g.q_r);
-            assert_eq!(pk.q_o.evaluate(&w), g.q_o);
-            assert_eq!(pk.q_m.evaluate(&w), g.q_m);
-            assert_eq!(pk.q_c.evaluate(&w), g.q_c);
+            assert_eq!(q_l.poly.evaluate(&w), g.q_l);
+            assert_eq!(q_r.poly.evaluate(&w), g.q_r);
+            assert_eq!(q_o.poly.evaluate(&w), g.q_o);
+            assert_eq!(q_m.poly.evaluate(&w), g.q_m);
+            assert_eq!(q_c.poly.evaluate(&w), g.q_c);
+            assert_eq!(q_m.on_h[i], g.q_m);
         }
         // padding rows are empty gates
         for i in c.num_gates()..pk.vk.n {
             let w = pk.domain.element(i);
-            assert!(pk.q_l.evaluate(&w).is_zero());
-            assert!(pk.q_c.evaluate(&w).is_zero());
+            assert!(q_l.poly.evaluate(&w).is_zero());
+            assert!(q_c.poly.evaluate(&w).is_zero());
+        }
+        // coset evaluations agree with the polynomial
+        for (x, v) in pk.coset_points.iter().zip(&q_m.on_coset) {
+            assert_eq!(q_m.poly.evaluate(x), *v);
+        }
+        for (i, x) in pk.coset_points.iter().enumerate() {
+            assert_eq!(
+                pk.z_h_inv_coset[i % 4] * pk.domain.evaluate_vanishing_polynomial(*x),
+                Fr::one()
+            );
         }
     }
 
