@@ -38,7 +38,7 @@ fn main() {
     );
 
     let srs = Srs::<Bls12_381>::setup(512, &mut rng);
-    let pk = preprocess(&circuit, &srs);
+    let pk = preprocess(&circuit, &srs).unwrap();
 
     let t = Instant::now();
     let proof = prove(&srs, &pk, &circuit, &mut rng).expect("witness is valid");

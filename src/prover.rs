@@ -453,7 +453,7 @@ mod tests {
         let mut rng = test_rng();
         let srs = Srs::<Bls12_381>::setup(32, &mut rng);
         let c = circuit();
-        let pk = preprocess(&c, &srs);
+        let pk = preprocess(&c, &srs).unwrap();
         let w = Witness::from_circuit(&c, pk.domain.size());
         let (beta, gamma) = (Fr::rand(&mut rng), Fr::rand(&mut rng));
         let z = accumulator(&pk, &w, beta, gamma, &mut rng).unwrap();
@@ -507,7 +507,7 @@ mod tests {
         let mut rng = test_rng();
         let srs = Srs::<Bls12_381>::setup(32, &mut rng);
         let c = circuit();
-        let pk = preprocess(&c, &srs);
+        let pk = preprocess(&c, &srs).unwrap();
         let n = pk.domain.size();
         let w = Witness::from_circuit(&c, n);
         let (beta, gamma, alpha) = (Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng));
@@ -548,7 +548,7 @@ mod tests {
         let xy = c.mul(x, y);
         let k = c.constant(Fr::from(13u64));
         c.assert_equal(xy, k);
-        let pk = preprocess(&c, &srs);
+        let pk = preprocess(&c, &srs).unwrap();
         let w = Witness::from_circuit(&c, pk.domain.size());
         let (beta, gamma, alpha) = (Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng));
         let wires = wire_polys(&pk, &w, &mut rng);

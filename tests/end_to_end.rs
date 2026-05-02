@@ -22,7 +22,7 @@ fn cubic_proves_and_verifies() {
     let srs = Srs::<Bls12_381>::setup(64, &mut rng);
     let circuit = cubic(3, 35);
     assert!(circuit.is_satisfied());
-    let pk = preprocess(&circuit, &srs);
+    let pk = preprocess(&circuit, &srs).unwrap();
     let proof = prove(&srs, &pk, &circuit, &mut rng).unwrap();
     assert!(verify(&pk.vk, &circuit.public_inputs(), &proof));
 }
@@ -32,7 +32,7 @@ fn wrong_public_input_rejected() {
     let mut rng = test_rng();
     let srs = Srs::<Bls12_381>::setup(64, &mut rng);
     let circuit = cubic(3, 35);
-    let pk = preprocess(&circuit, &srs);
+    let pk = preprocess(&circuit, &srs).unwrap();
     let proof = prove(&srs, &pk, &circuit, &mut rng).unwrap();
     assert!(!verify(&pk.vk, &[Fr::from(36u64)], &proof));
     assert!(!verify(&pk.vk, &[], &proof));
@@ -44,7 +44,7 @@ fn unsatisfied_circuit_cannot_prove() {
     let srs = Srs::<Bls12_381>::setup(64, &mut rng);
     let circuit = cubic(3, 36);
     assert!(!circuit.is_satisfied());
-    let pk = preprocess(&circuit, &srs);
+    let pk = preprocess(&circuit, &srs).unwrap();
     assert_eq!(
         prove(&srs, &pk, &circuit, &mut rng).err(),
         Some(ProveError::Unsatisfied)
@@ -57,7 +57,7 @@ fn tampered_proof_rejected() {
     let mut rng = test_rng();
     let srs = Srs::<Bls12_381>::setup(64, &mut rng);
     let circuit = cubic(3, 35);
-    let pk = preprocess(&circuit, &srs);
+    let pk = preprocess(&circuit, &srs).unwrap();
     let proof = prove(&srs, &pk, &circuit, &mut rng).unwrap();
     let pi = circuit.public_inputs();
 
@@ -91,7 +91,7 @@ fn proof_for_one_circuit_does_not_verify_for_another() {
     let mut rng = test_rng();
     let srs = Srs::<Bls12_381>::setup(64, &mut rng);
     let circuit = cubic(3, 35);
-    let pk = preprocess(&circuit, &srs);
+    let pk = preprocess(&circuit, &srs).unwrap();
     let proof = prove(&srs, &pk, &circuit, &mut rng).unwrap();
 
     // same shape, different constant
@@ -104,7 +104,7 @@ fn proof_for_one_circuit_does_not_verify_for_another() {
     let s = other.add(x3, x);
     let s = other.add(s, six);
     other.assert_equal(s, y);
-    let other_pk = preprocess(&other, &srs);
+    let other_pk = preprocess(&other, &srs).unwrap();
     assert!(!verify(&other_pk.vk, &[Fr::from(35u64)], &proof));
 }
 
@@ -115,7 +115,7 @@ fn challenges_depend_on_the_circuit() {
     use plonk::transcript::Transcript;
     let mut rng = test_rng();
     let srs = Srs::<Bls12_381>::setup(64, &mut rng);
-    let a = preprocess(&cubic(3, 35), &srs);
+    let a = preprocess(&cubic(3, 35), &srs).unwrap();
     let mut other = Circuit::<Fr>::new();
     let y = other.public_input(Fr::from(35u64));
     let x = other.alloc(Fr::from(3u64));
@@ -125,7 +125,7 @@ fn challenges_depend_on_the_circuit() {
     let s = other.add(x3, x);
     let s = other.add(s, six);
     other.assert_equal(s, y);
-    let b = preprocess(&other, &srs);
+    let b = preprocess(&other, &srs).unwrap();
     let pi = [Fr::from(35u64)];
     let mut ta: Transcript = a.vk.transcript(&pi);
     let mut tb: Transcript = b.vk.transcript(&pi);
@@ -135,7 +135,7 @@ fn challenges_depend_on_the_circuit() {
 #[test]
 fn a_few_hundred_gates() {
     let mut rng = test_rng();
-    let srs = Srs::<Bls12_381>::setup(1024 + 5, &mut rng);
+    let srs = Srs::<Bls12_381>::setup(plonk::required_srs_degree(1024), &mut rng);
     // fibonacci-ish chain with a public output
     let mut c = Circuit::<Fr>::new();
     let mut a = c.constant(Fr::from(1u64));
@@ -149,7 +149,7 @@ fn a_few_hundred_gates() {
     let out = c.public_input(c.value(b));
     c.assert_equal(out, b);
     assert!(c.is_satisfied());
-    let pk = preprocess(&c, &srs);
+    let pk = preprocess(&c, &srs).unwrap();
     assert_eq!(pk.vk.n, 1024);
     let proof = prove(&srs, &pk, &c, &mut rng).unwrap();
     assert!(verify(&pk.vk, &c.public_inputs(), &proof));
@@ -163,7 +163,7 @@ fn proof_round_trips_through_bytes() {
     let mut rng = test_rng();
     let srs = Srs::<Bls12_381>::setup(64, &mut rng);
     let circuit = cubic(3, 35);
-    let pk = preprocess(&circuit, &srs);
+    let pk = preprocess(&circuit, &srs).unwrap();
     let proof = prove(&srs, &pk, &circuit, &mut rng).unwrap();
 
     let bytes = proof.to_bytes();
@@ -207,7 +207,7 @@ fn low_degree_violation_pattern_is_rejected() {
     }
     assert_eq!(c.num_gates(), 8);
     assert!(!c.is_satisfied());
-    let pk = preprocess(&c, &srs);
+    let pk = preprocess(&c, &srs).unwrap();
     match prove(&srs, &pk, &c, &mut rng) {
         Err(ProveError::Unsatisfied) => {}
         Err(e) => panic!("unexpected error {e}"),

@@ -26,8 +26,8 @@ fn bench(c: &mut Criterion) {
     for log in [8, 10, 12] {
         let n = 1usize << log;
         let circuit = chain(n - 8);
-        let srs = Srs::<Bls12_381>::setup(n + 5, &mut rng);
-        let pk = preprocess(&circuit, &srs);
+        let srs = Srs::<Bls12_381>::setup(plonk::required_srs_degree(n), &mut rng);
+        let pk = preprocess(&circuit, &srs).unwrap();
         assert_eq!(pk.vk.n, n);
         let pi = circuit.public_inputs();
 

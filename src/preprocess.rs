@@ -84,6 +84,27 @@ impl<E: Pairing> VerifierKey<E> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PreprocessError {
+    /// The SRS doesn't have enough powers for this many gates.
+    SrsTooSmall { needed: usize, have: usize },
+    /// The field has no multiplicative subgroup of the required size.
+    NoDomain { size: usize },
+}
+
+impl std::fmt::Display for PreprocessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PreprocessError::SrsTooSmall { needed, have } => {
+                write!(f, "srs supports degree {have}, need {needed}")
+            }
+            PreprocessError::NoDomain { size } => write!(f, "no evaluation domain of size {size}"),
+        }
+    }
+}
+
+impl std::error::Error for PreprocessError {}
+
 /// Smallest domain we'll use. The blinded quotient has degree 3n+5 and is
 /// recovered from 4n coset evaluations, which needs n >= 8.
 pub const MIN_DOMAIN_SIZE: usize = 8;
@@ -93,19 +114,32 @@ pub fn domain_size(num_gates: usize) -> usize {
     num_gates.next_power_of_two().max(MIN_DOMAIN_SIZE)
 }
 
-pub fn preprocess<E: Pairing>(circuit: &Circuit<E::ScalarField>, srs: &Srs<E>) -> ProverKey<E> {
+/// The SRS degree needed to prove a circuit with this many gates. The
+/// blinded quotient's last chunk has degree n+5.
+pub fn required_srs_degree(num_gates: usize) -> usize {
+    domain_size(num_gates) + 5
+}
+
+pub fn preprocess<E: Pairing>(
+    circuit: &Circuit<E::ScalarField>,
+    srs: &Srs<E>,
+) -> Result<ProverKey<E>, PreprocessError> {
     let n = domain_size(circuit.num_gates());
     let domain = Radix2EvaluationDomain::<E::ScalarField>::new(n)
-        .expect("field has no subgroup of that size");
-    // the blinded quotient's last chunk has degree n+5
-    assert!(srs.max_degree() >= n + 5, "srs too small for {} gates", n);
+        .ok_or(PreprocessError::NoDomain { size: n })?;
+    let needed = required_srs_degree(circuit.num_gates());
+    if srs.max_degree() < needed {
+        return Err(PreprocessError::SrsTooSmall {
+            needed,
+            have: srs.max_degree(),
+        });
+    }
 
     let (k1, k2) = coset_generators(&domain);
 
     let coset = Radix2EvaluationDomain::<E::ScalarField>::new(4 * n)
-        .expect("no domain of size 4n")
-        .get_coset(E::ScalarField::GENERATOR)
-        .expect("generator is not in the domain");
+        .and_then(|d| d.get_coset(E::ScalarField::GENERATOR))
+        .ok_or(PreprocessError::NoDomain { size: 4 * n })?;
     let coset_points: Vec<E::ScalarField> = coset.elements().collect();
     let z_h_inv_coset = [0, 1, 2, 3].map(|i| {
         (coset_points[i].pow([n as u64]) - E::ScalarField::one())
@@ -158,7 +192,7 @@ pub fn preprocess<E: Pairing>(circuit: &Circuit<E::ScalarField>, srs: &Srs<E>) -
         kzg: srs.verifier_key(),
     };
 
-    ProverKey {
+    Ok(ProverKey {
         domain,
         coset,
         coset_points,
@@ -171,7 +205,7 @@ pub fn preprocess<E: Pairing>(circuit: &Circuit<E::ScalarField>, srs: &Srs<E>) -
         l1,
         permutation,
         vk,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -197,7 +231,7 @@ mod tests {
         let mut rng = test_rng();
         let srs = Srs::<Bls12_381>::setup(16, &mut rng);
         let c = circuit(3, 4);
-        let pk = preprocess(&c, &srs);
+        let pk = preprocess(&c, &srs).unwrap();
         assert_eq!(pk.vk.n, 8);
         let [q_l, q_r, q_o, q_m, q_c] = &pk.selectors;
         for (i, g) in c.gates().iter().enumerate() {
@@ -228,11 +262,26 @@ mod tests {
     }
 
     #[test]
+    fn srs_too_small() {
+        let mut rng = test_rng();
+        let srs = Srs::<Bls12_381>::setup(12, &mut rng);
+        assert_eq!(
+            preprocess(&circuit(3, 4), &srs).err(),
+            Some(PreprocessError::SrsTooSmall {
+                needed: 13,
+                have: 12
+            })
+        );
+        let srs = Srs::<Bls12_381>::setup(13, &mut rng);
+        assert!(preprocess(&circuit(3, 4), &srs).is_ok());
+    }
+
+    #[test]
     fn verifier_key_is_witness_independent() {
         let mut rng = test_rng();
         let srs = Srs::<Bls12_381>::setup(16, &mut rng);
-        let a = preprocess(&circuit(3, 4), &srs);
-        let b = preprocess(&circuit(5, 2), &srs);
+        let a = preprocess(&circuit(3, 4), &srs).unwrap();
+        let b = preprocess(&circuit(5, 2), &srs).unwrap();
         assert_eq!(a.vk.q_l, b.vk.q_l);
         assert_eq!(a.vk.q_m, b.vk.q_m);
         assert_eq!(a.vk.s_sigma, b.vk.s_sigma);
