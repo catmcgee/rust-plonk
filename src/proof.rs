@@ -24,6 +24,20 @@ pub struct Evaluations<F: ark_ff::Field> {
     pub z_omega: F,
 }
 
+impl<F: ark_ff::Field> Evaluations<F> {
+    /// The two products in the permutation term that depend only on these
+    /// evaluations: `f = prod (w + beta id + gamma)` in full, and `g` without
+    /// its `S_sigma3` factor, which stays a polynomial in `r(X)`.
+    pub fn permutation_factors(&self, beta: F, gamma: F, zeta: F, k1: F, k2: F) -> (F, F) {
+        let f = (self.a + beta * zeta + gamma)
+            * (self.b + beta * k1 * zeta + gamma)
+            * (self.c + beta * k2 * zeta + gamma);
+        let g_partial =
+            (self.a + beta * self.s_sigma1 + gamma) * (self.b + beta * self.s_sigma2 + gamma);
+        (f, g_partial)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct Proof<E: Pairing> {
     pub a: Commitment<E>,

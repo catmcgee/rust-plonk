@@ -1,30 +1,13 @@
 //! The verifier, following section 8.4 of the paper.
 
 use crate::kzg::{Commitment, Opening};
+use crate::poly::{lagrange_at, vanishing_at};
 use crate::preprocess::VerifierKey;
 use crate::proof::Proof;
+use crate::rounds::Rounds;
 use ark_ec::{pairing::Pairing, CurveGroup};
-use ark_ff::{Field, One, Zero};
+use ark_ff::Zero;
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
-
-/// `L_0(zeta), ..., L_{count-1}(zeta)` with one batch inversion.
-/// `zeta` must not be in the domain.
-fn lagrange_at<F: ark_ff::FftField>(
-    domain: &Radix2EvaluationDomain<F>,
-    zeta: F,
-    count: usize,
-) -> Vec<F> {
-    let n = domain.size() as u64;
-    let z_h = zeta.pow([n]) - F::one();
-    let n_inv = F::from(n).inverse().expect("n is nonzero");
-    let mut denoms: Vec<F> = (0..count).map(|i| zeta - domain.element(i)).collect();
-    ark_ff::batch_inversion(&mut denoms);
-    denoms
-        .iter()
-        .enumerate()
-        .map(|(i, d)| domain.element(i) * z_h * n_inv * d)
-        .collect()
-}
 
 pub fn verify<E: Pairing>(
     vk: &VerifierKey<E>,
@@ -40,42 +23,22 @@ pub fn verify<E: Pairing>(
     };
     let omega = domain.group_gen();
     let ev = &proof.evals;
-    let one = E::ScalarField::one();
 
     // replay the transcript
-    let mut transcript = vk.transcript(public_inputs);
-    transcript.absorb(b"a", &proof.a.0);
-    transcript.absorb(b"b", &proof.b.0);
-    transcript.absorb(b"c", &proof.c.0);
-    let beta: E::ScalarField = transcript.challenge(b"beta");
-    let gamma: E::ScalarField = transcript.challenge(b"gamma");
-    transcript.absorb(b"z", &proof.z.0);
-    let alpha: E::ScalarField = transcript.challenge(b"alpha");
-    transcript.absorb(b"t_lo", &proof.t_lo.0);
-    transcript.absorb(b"t_mid", &proof.t_mid.0);
-    transcript.absorb(b"t_hi", &proof.t_hi.0);
-    let zeta: E::ScalarField = transcript.challenge(b"zeta");
-    transcript.absorb(b"a(zeta)", &ev.a);
-    transcript.absorb(b"b(zeta)", &ev.b);
-    transcript.absorb(b"c(zeta)", &ev.c);
-    transcript.absorb(b"s_sigma1(zeta)", &ev.s_sigma1);
-    transcript.absorb(b"s_sigma2(zeta)", &ev.s_sigma2);
-    transcript.absorb(b"z(zeta omega)", &ev.z_omega);
-    let v: E::ScalarField = transcript.challenge(b"v");
-    transcript.absorb(b"w_zeta", &proof.w_zeta.0);
-    transcript.absorb(b"w_zeta_omega", &proof.w_zeta_omega.0);
-    let u: E::ScalarField = transcript.challenge(b"u");
+    let mut rounds = Rounds::start(vk, public_inputs);
+    let (beta, gamma) = rounds.wires([&proof.a, &proof.b, &proof.c]);
+    let alpha = rounds.accumulator(&proof.z);
+    let zeta = rounds.quotient([&proof.t_lo, &proof.t_mid, &proof.t_hi]);
+    let v = rounds.evaluations(ev);
+    let u = rounds.openings(&proof.w_zeta, &proof.w_zeta_omega);
 
     // zeta in H would make Z_H(zeta) = 0 and the identity vacuous
-    let zeta_n = zeta.pow([n as u64]);
-    let z_h = zeta_n - one;
+    let (zeta_n, z_h, l1) = vanishing_at(n, zeta);
     if z_h.is_zero() {
         return false;
     }
-    // L_i(zeta) = omega^i (zeta^n - 1) / (n (zeta - omega^i)), only for the
-    // first l rows, so the verifier stays O(l) rather than O(n).
-    let lagrange = lagrange_at(&domain, zeta, public_inputs.len().max(1));
-    let l1 = lagrange[0];
+    // L_i(zeta) only for the first l rows, so the verifier stays O(l).
+    let lagrange = lagrange_at(&domain, zeta, public_inputs.len());
     // PI(zeta) = -sum x_i L_i(zeta)
     let pi: E::ScalarField = -public_inputs
         .iter()
@@ -85,10 +48,7 @@ pub fn verify<E: Pairing>(
 
     // r(X) = r_0 + (linear combination of committed polynomials). The
     // constant part is computed here, the rest as a commitment [D].
-    let f = (ev.a + beta * zeta + gamma)
-        * (ev.b + beta * vk.k1 * zeta + gamma)
-        * (ev.c + beta * vk.k2 * zeta + gamma);
-    let g_partial = (ev.a + beta * ev.s_sigma1 + gamma) * (ev.b + beta * ev.s_sigma2 + gamma);
+    let (f, g_partial) = ev.permutation_factors(beta, gamma, zeta, vk.k1, vk.k2);
     let r0 = pi - l1 * alpha * alpha - alpha * g_partial * (ev.c + gamma) * ev.z_omega;
 
     let alpha2 = alpha * alpha;
@@ -132,22 +92,4 @@ pub fn verify<E: Pairing>(
         ],
         u,
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ark_bls12_381::Fr;
-    use ark_ff::UniformRand;
-    use ark_std::test_rng;
-
-    #[test]
-    fn lagrange_matches_arkworks() {
-        let mut rng = test_rng();
-        let domain = Radix2EvaluationDomain::<Fr>::new(16).unwrap();
-        let zeta = Fr::rand(&mut rng);
-        let all = domain.evaluate_all_lagrange_coefficients(zeta);
-        assert_eq!(lagrange_at(&domain, zeta, 5), all[..5]);
-        assert_eq!(lagrange_at(&domain, zeta, 16), all);
-    }
 }

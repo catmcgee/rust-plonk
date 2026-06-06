@@ -2,8 +2,10 @@
 
 use crate::circuit::Circuit;
 use crate::kzg::Srs;
+use crate::poly::{interpolate, vanishing_at};
 use crate::preprocess::ProverKey;
 use crate::proof::{Evaluations, Proof};
+use crate::rounds::Rounds;
 use ark_ec::pairing::Pairing;
 use ark_ff::{FftField, Field, One, UniformRand, Zero};
 use ark_poly::{
@@ -60,14 +62,6 @@ impl<F: Field> Witness<F> {
         }
         w
     }
-}
-
-/// Interpolate evaluations over the domain.
-pub fn interpolate<F: FftField>(
-    domain: &Radix2EvaluationDomain<F>,
-    evals: &[F],
-) -> DensePolynomial<F> {
-    DensePolynomial::from_coefficients_vec(domain.ifft(evals))
 }
 
 /// `p(X * omega)`
@@ -289,21 +283,15 @@ pub fn linearisation<E: Pairing>(
     alpha: E::ScalarField,
     zeta: E::ScalarField,
 ) -> DensePolynomial<E::ScalarField> {
-    let n = pk.domain.size() as u64;
     let one = E::ScalarField::one();
-    let zeta_n = zeta.pow([n]);
-    let z_h = zeta_n - one;
-    let l1 = z_h / (E::ScalarField::from(n) * (zeta - one));
+    let (zeta_n, z_h, l1) = vanishing_at(pk.domain.size(), zeta);
     let konst = |k: E::ScalarField| DensePolynomial::from_coefficients_vec(vec![k]);
 
     let [q_l, q_r, q_o, q_m, q_c] = pk.selectors.each_ref().map(|q| &q.poly);
     let gate = &(&(&(&(q_m * (ev.a * ev.b)) + &(q_l * ev.a)) + &(q_r * ev.b)) + &(q_o * ev.c))
         + &(q_c + &konst(pi_at_zeta));
 
-    let f = (ev.a + beta * zeta + gamma)
-        * (ev.b + beta * pk.k1 * zeta + gamma)
-        * (ev.c + beta * pk.k2 * zeta + gamma);
-    let g_partial = (ev.a + beta * ev.s_sigma1 + gamma) * (ev.b + beta * ev.s_sigma2 + gamma);
+    let (f, g_partial) = ev.permutation_factors(beta, gamma, zeta, pk.k1, pk.k2);
     // g = g_partial * (c + beta S_sigma3(X) + gamma)
     let g = &(&pk.s_sigma[2].poly * (g_partial * beta)) + &konst(g_partial * (ev.c + gamma));
     let perm = &(z * f) - &(&g * ev.z_omega);
@@ -344,34 +332,26 @@ pub fn prove<E: Pairing, R: RngCore>(
     }
     let public_inputs = circuit.public_inputs();
 
-    let mut transcript = pk.vk.transcript(&public_inputs);
+    let mut rounds = Rounds::start(&pk.vk, &public_inputs);
 
     // round 1
     let w = Witness::from_circuit(circuit, n);
     let wires = wire_polys(pk, &w, rng);
-    let [ca, cb, cc] = [0, 1, 2].map(|i| srs.commit(&wires[i]));
-    transcript.absorb(b"a", &ca.0);
-    transcript.absorb(b"b", &cb.0);
-    transcript.absorb(b"c", &cc.0);
+    let [ca, cb, cc] = wires.each_ref().map(|p| srs.commit(p));
 
     // round 2
-    let beta = transcript.challenge(b"beta");
-    let gamma = transcript.challenge(b"gamma");
+    let (beta, gamma) = rounds.wires([&ca, &cb, &cc]);
     let z = accumulator(pk, &w, beta, gamma, rng)?;
     let cz = srs.commit(&z);
-    transcript.absorb(b"z", &cz.0);
 
     // round 3
-    let alpha = transcript.challenge(b"alpha");
+    let alpha = rounds.accumulator(&cz);
     let pi = public_input_poly(&pk.domain, &public_inputs);
     let t = quotient(pk, &wires, &z, &pi, beta, gamma, alpha, rng)?;
-    let [ct_lo, ct_mid, ct_hi] = [0, 1, 2].map(|i| srs.commit(&t[i]));
-    transcript.absorb(b"t_lo", &ct_lo.0);
-    transcript.absorb(b"t_mid", &ct_mid.0);
-    transcript.absorb(b"t_hi", &ct_hi.0);
+    let [ct_lo, ct_mid, ct_hi] = t.each_ref().map(|p| srs.commit(p));
 
     // round 4
-    let zeta: E::ScalarField = transcript.challenge(b"zeta");
+    let zeta = rounds.quotient([&ct_lo, &ct_mid, &ct_hi]);
     let [a, b, c] = &wires;
     let evals = Evaluations {
         a: a.evaluate(&zeta),
@@ -381,15 +361,9 @@ pub fn prove<E: Pairing, R: RngCore>(
         s_sigma2: pk.s_sigma[1].poly.evaluate(&zeta),
         z_omega: z.evaluate(&(zeta * omega)),
     };
-    transcript.absorb(b"a(zeta)", &evals.a);
-    transcript.absorb(b"b(zeta)", &evals.b);
-    transcript.absorb(b"c(zeta)", &evals.c);
-    transcript.absorb(b"s_sigma1(zeta)", &evals.s_sigma1);
-    transcript.absorb(b"s_sigma2(zeta)", &evals.s_sigma2);
-    transcript.absorb(b"z(zeta omega)", &evals.z_omega);
 
     // round 5
-    let v = transcript.challenge(b"v");
+    let v = rounds.evaluations(&evals);
     let r = linearisation(
         pk,
         &z,

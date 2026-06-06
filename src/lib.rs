@@ -3,9 +3,11 @@
 pub mod circuit;
 pub mod kzg;
 pub mod permutation;
+pub mod poly;
 pub mod preprocess;
 pub mod proof;
 pub mod prover;
+pub mod rounds;
 pub mod transcript;
 pub mod verifier;
 
