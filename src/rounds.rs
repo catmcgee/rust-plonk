@@ -54,8 +54,8 @@ impl Rounds {
     /// Round 5 -> `u`, only the verifier needs it
     pub fn openings<E: Pairing>(
         &mut self,
-        w_zeta: &kzg::Proof<E>,
-        w_zeta_omega: &kzg::Proof<E>,
+        w_zeta: &kzg::OpeningProof<E>,
+        w_zeta_omega: &kzg::OpeningProof<E>,
     ) -> E::ScalarField {
         self.t.absorb(b"w_zeta", &w_zeta.0);
         self.t.absorb(b"w_zeta_omega", &w_zeta_omega.0);

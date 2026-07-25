@@ -33,14 +33,14 @@ pub struct Commitment<E: Pairing>(pub E::G1Affine);
 
 /// Witness `[(p(X) - p(z)) / (X - z)]_1` for an evaluation at `z`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
-pub struct Proof<E: Pairing>(pub E::G1Affine);
+pub struct OpeningProof<E: Pairing>(pub E::G1Affine);
 
 /// A claimed opening: commitment, point, value, proof.
 pub struct Opening<E: Pairing> {
     pub comm: Commitment<E>,
     pub point: E::ScalarField,
     pub value: E::ScalarField,
-    pub proof: Proof<E>,
+    pub proof: OpeningProof<E>,
 }
 
 impl<E: Pairing> Srs<E> {
@@ -96,11 +96,11 @@ impl<E: Pairing> Srs<E> {
         &self,
         p: &DensePolynomial<E::ScalarField>,
         z: E::ScalarField,
-    ) -> (E::ScalarField, Proof<E>) {
+    ) -> (E::ScalarField, OpeningProof<E>) {
         let value = p.evaluate(&z);
         let (q, rem) = divide_by_linear(p, z);
         debug_assert!(rem == value);
-        (value, Proof(self.commit(&q).0))
+        (value, OpeningProof(self.commit(&q).0))
     }
 
     /// Open several polynomials at the same point with one proof.
@@ -113,11 +113,11 @@ impl<E: Pairing> Srs<E> {
         polys: &[&DensePolynomial<E::ScalarField>],
         z: E::ScalarField,
         gamma: E::ScalarField,
-    ) -> (Vec<E::ScalarField>, Proof<E>) {
+    ) -> (Vec<E::ScalarField>, OpeningProof<E>) {
         let values: Vec<_> = polys.iter().map(|p| p.evaluate(&z)).collect();
         let folded = fold(polys, gamma);
         let (q, _) = divide_by_linear(&folded, z);
-        (values, Proof(self.commit(&q).0))
+        (values, OpeningProof(self.commit(&q).0))
     }
 }
 
@@ -139,7 +139,7 @@ impl<E: Pairing> VerifierKey<E> {
         comm: &Commitment<E>,
         z: E::ScalarField,
         value: E::ScalarField,
-        proof: &Proof<E>,
+        proof: &OpeningProof<E>,
     ) -> bool {
         // e(C - v*G + z*W, H) * e(-W, tau*H) == 1
         let lhs = comm.0.into_group() - self.g * value + proof.0 * z;
@@ -157,7 +157,7 @@ impl<E: Pairing> VerifierKey<E> {
         z: E::ScalarField,
         values: &[E::ScalarField],
         gamma: E::ScalarField,
-        proof: &Proof<E>,
+        proof: &OpeningProof<E>,
     ) -> bool {
         if comms.len() != values.len() {
             return false;

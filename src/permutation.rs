@@ -21,7 +21,7 @@ impl Permutation {
     /// Build from a circuit, padding with the zero variable up to `n` rows.
     pub fn from_circuit<F: Field>(circuit: &Circuit<F>, n: usize) -> Self {
         assert!(n >= circuit.num_gates());
-        let mut slots = vec![Circuit::<F>::ZERO; 3 * n];
+        let mut slots = vec![Variable::ZERO; 3 * n];
         for (row, g) in circuit.gates().iter().enumerate() {
             slots[row] = g.a;
             slots[n + row] = g.b;
@@ -148,7 +148,7 @@ mod tests {
         let c = small_circuit();
         let n = 8;
         let p = Permutation::from_circuit(&c, n);
-        let mut slots = vec![Circuit::<Fr>::ZERO; 3 * n];
+        let mut slots = vec![Variable::ZERO; 3 * n];
         for (row, g) in c.gates().iter().enumerate() {
             slots[row] = g.a;
             slots[n + row] = g.b;

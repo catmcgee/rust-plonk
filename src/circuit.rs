@@ -17,6 +17,12 @@ use ark_ff::Field;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Variable(pub(crate) usize);
 
+impl Variable {
+    /// Every circuit's variable 0 is a constant zero, used to fill wire
+    /// slots a gate doesn't use.
+    pub const ZERO: Variable = Variable(0);
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Gate<F: Field> {
     pub a: Variable,
@@ -39,8 +45,7 @@ pub struct Circuit<F: Field> {
 }
 
 impl<F: Field> Circuit<F> {
-    /// A fresh circuit. Variable 0 is reserved as a constant zero and is used
-    /// to fill wire slots a gate doesn't use.
+    /// A fresh circuit with `Variable::ZERO` allocated and constrained.
     pub fn new() -> Self {
         let mut c = Circuit {
             gates: Vec::new(),
@@ -49,9 +54,9 @@ impl<F: Field> Circuit<F> {
         };
         // 1 * zero + 0 = 0
         c.gate(
-            Self::ZERO,
-            Self::ZERO,
-            Self::ZERO,
+            Variable::ZERO,
+            Variable::ZERO,
+            Variable::ZERO,
             F::one(),
             F::zero(),
             F::zero(),
@@ -60,8 +65,6 @@ impl<F: Field> Circuit<F> {
         );
         c
     }
-
-    pub const ZERO: Variable = Variable(0);
 
     pub fn num_gates(&self) -> usize {
         self.gates.len()
@@ -130,8 +133,8 @@ impl<F: Field> Circuit<F> {
             row,
             Gate {
                 a: v,
-                b: Self::ZERO,
-                c: Self::ZERO,
+                b: Variable::ZERO,
+                c: Variable::ZERO,
                 q_l: F::one(),
                 q_r: F::zero(),
                 q_o: F::zero(),
@@ -149,8 +152,8 @@ impl<F: Field> Circuit<F> {
         // v - k = 0
         self.gate(
             v,
-            Self::ZERO,
-            Self::ZERO,
+            Variable::ZERO,
+            Variable::ZERO,
             F::one(),
             F::zero(),
             F::zero(),
@@ -204,7 +207,7 @@ impl<F: Field> Circuit<F> {
         // x + k - z = 0
         self.gate(
             x,
-            Self::ZERO,
+            Variable::ZERO,
             z,
             F::one(),
             F::zero(),
@@ -220,7 +223,7 @@ impl<F: Field> Circuit<F> {
         // k * x - z = 0
         self.gate(
             x,
-            Self::ZERO,
+            Variable::ZERO,
             z,
             k,
             F::zero(),
@@ -255,7 +258,7 @@ impl<F: Field> Circuit<F> {
         self.gate(
             x,
             x,
-            Self::ZERO,
+            Variable::ZERO,
             -F::one(),
             F::zero(),
             F::zero(),
@@ -268,8 +271,8 @@ impl<F: Field> Circuit<F> {
         // x - k = 0
         self.gate(
             x,
-            Self::ZERO,
-            Self::ZERO,
+            Variable::ZERO,
+            Variable::ZERO,
             F::one(),
             F::zero(),
             F::zero(),
@@ -287,7 +290,7 @@ impl<F: Field> Circuit<F> {
         use ark_ff::BigInteger;
         let value = self.value(x).into_bigint();
         let mut out = Vec::with_capacity(bits);
-        let mut acc = Self::ZERO;
+        let mut acc = Variable::ZERO;
         let mut pow = F::one();
         for i in 0..bits {
             let bit = self.alloc(if value.get_bit(i) {
@@ -321,7 +324,7 @@ impl<F: Field> Circuit<F> {
         self.gate(
             x,
             y,
-            Self::ZERO,
+            Variable::ZERO,
             F::one(),
             -F::one(),
             F::zero(),
@@ -419,7 +422,7 @@ mod tests {
         assert_eq!(c.public_inputs(), vec![Fr::from(4u64), Fr::from(12u64)]);
         assert_eq!(c.gates()[0].a, y);
         assert_eq!(c.gates()[1].a, out);
-        assert_eq!(c.gates()[2].a, Circuit::<Fr>::ZERO);
+        assert_eq!(c.gates()[2].a, Variable::ZERO);
     }
 
     #[test]

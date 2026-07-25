@@ -78,7 +78,7 @@ fn tampered_proof_rejected() {
     assert!(!verify(&pk.vk, &pi, &p));
 
     let mut p = proof.clone();
-    p.w_zeta = plonk::kzg::Proof(p.w_zeta_omega.0);
+    p.w_zeta = plonk::kzg::OpeningProof(p.w_zeta_omega.0);
     assert!(!verify(&pk.vk, &pi, &p));
 
     let mut p = proof.clone();

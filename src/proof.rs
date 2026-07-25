@@ -49,9 +49,9 @@ pub struct Proof<E: Pairing> {
     pub t_hi: Commitment<E>,
     pub evals: Evaluations<E::ScalarField>,
     /// Batched opening of `r, a, b, c, S_sigma1, S_sigma2` at `zeta`.
-    pub w_zeta: kzg::Proof<E>,
+    pub w_zeta: kzg::OpeningProof<E>,
     /// Opening of `z` at `zeta * omega`.
-    pub w_zeta_omega: kzg::Proof<E>,
+    pub w_zeta_omega: kzg::OpeningProof<E>,
 }
 
 impl<E: Pairing> Proof<E> {
