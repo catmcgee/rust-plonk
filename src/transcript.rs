@@ -32,7 +32,7 @@ impl Transcript {
         self.state = h.finalize().into();
     }
 
-    pub fn absorb<T: CanonicalSerialize>(&mut self, label: &[u8], item: &T) {
+    pub fn absorb<T: CanonicalSerialize + ?Sized>(&mut self, label: &[u8], item: &T) {
         let mut buf = Vec::with_capacity(item.compressed_size());
         item.serialize_compressed(&mut buf)
             .expect("serialization into a Vec cannot fail");

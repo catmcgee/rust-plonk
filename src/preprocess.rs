@@ -79,7 +79,7 @@ impl<E: Pairing> VerifierKey<E> {
         t.absorb(b"g", &self.kzg.g);
         t.absorb(b"h", &self.kzg.h);
         t.absorb(b"tau_h", &self.kzg.tau_h);
-        t.absorb(b"public inputs", &public_inputs.to_vec());
+        t.absorb(b"public inputs", public_inputs);
         t
     }
 }

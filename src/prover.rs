@@ -64,25 +64,6 @@ impl<F: Field> Witness<F> {
     }
 }
 
-/// `p(X * omega)`
-pub fn shift<F: FftField>(
-    domain: &Radix2EvaluationDomain<F>,
-    p: &DensePolynomial<F>,
-) -> DensePolynomial<F> {
-    let omega = domain.group_gen();
-    let mut pow = F::one();
-    let coeffs = p
-        .coeffs
-        .iter()
-        .map(|c| {
-            let r = *c * pow;
-            pow *= omega;
-            r
-        })
-        .collect();
-    DensePolynomial::from_coefficients_vec(coeffs)
-}
-
 /// `PI(X) = -sum_i x_i L_i(X)`
 pub fn public_input_poly<F: FftField>(
     domain: &Radix2EvaluationDomain<F>,
@@ -375,16 +356,16 @@ pub fn prove<E: Pairing, R: RngCore>(
         alpha,
         zeta,
     );
-    let (values, w_zeta) = srs.open_batch(
+    if !r.evaluate(&zeta).is_zero() {
+        // Can't happen if the checks above passed; refuse to emit garbage.
+        return Err(ProveError::Unsatisfied);
+    }
+    let w_zeta = srs.open_batch(
         &[&r, a, b, c, &pk.s_sigma[0].poly, &pk.s_sigma[1].poly],
         zeta,
         v,
     );
-    if !values[0].is_zero() {
-        // Can't happen if the checks above passed; refuse to emit garbage.
-        return Err(ProveError::Unsatisfied);
-    }
-    let (_, w_zeta_omega) = srs.open(&z, zeta * omega);
+    let w_zeta_omega = srs.open_at(&z, zeta * omega);
 
     Ok(Proof {
         a: ca,
@@ -462,18 +443,6 @@ mod tests {
         for (i, e) in evals.iter().enumerate() {
             assert_eq!(q.evaluate(&domain.element(i)), *e);
         }
-    }
-
-    #[test]
-    fn shift_evaluates_at_omega_x() {
-        let mut rng = test_rng();
-        let domain = Radix2EvaluationDomain::<Fr>::new(16).unwrap();
-        let p = DensePolynomial::<Fr>::rand(20, &mut rng);
-        let x = Fr::rand(&mut rng);
-        assert_eq!(
-            shift(&domain, &p).evaluate(&x),
-            p.evaluate(&(x * domain.group_gen()))
-        );
     }
 
     #[test]

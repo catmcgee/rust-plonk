@@ -7,7 +7,7 @@ use ark_ec::{
     pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, AffineRepr, CurveGroup,
     PrimeGroup,
 };
-use ark_ff::{Field, One, PrimeField, UniformRand, Zero};
+use ark_ff::{Field, One, UniformRand, Zero};
 use ark_poly::{univariate::DensePolynomial, DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::RngCore;
@@ -85,9 +85,7 @@ impl<E: Pairing> Srs<E> {
             p.degree(),
             self.max_degree()
         );
-        let coeffs: Vec<<E::ScalarField as PrimeField>::BigInt> =
-            p.coeffs.iter().map(|c| c.into_bigint()).collect();
-        let c = E::G1::msm_bigint(&self.powers_of_g[..coeffs.len()], &coeffs);
+        let c = E::G1::msm_unchecked(&self.powers_of_g[..p.coeffs.len()], &p.coeffs);
         Commitment(c.into_affine())
     }
 
@@ -97,27 +95,31 @@ impl<E: Pairing> Srs<E> {
         p: &DensePolynomial<E::ScalarField>,
         z: E::ScalarField,
     ) -> (E::ScalarField, OpeningProof<E>) {
-        let value = p.evaluate(&z);
-        let (q, rem) = divide_by_linear(p, z);
-        debug_assert!(rem == value);
+        let (q, value) = divide_by_linear(p, z);
         (value, OpeningProof(self.commit(&q).0))
+    }
+
+    /// Just the proof, when the caller already knows `p(z)`.
+    pub fn open_at(
+        &self,
+        p: &DensePolynomial<E::ScalarField>,
+        z: E::ScalarField,
+    ) -> OpeningProof<E> {
+        self.open(p, z).1
     }
 
     /// Open several polynomials at the same point with one proof.
     ///
     /// The verifier supplies a random `gamma`; the polynomials are folded into
-    /// `sum_i gamma^i p_i` and that is opened once. Returns each `p_i(z)` and
-    /// the proof for the folded polynomial.
+    /// `sum_i gamma^i p_i` and that is opened once. The caller is expected to
+    /// know (and send) the individual `p_i(z)`.
     pub fn open_batch(
         &self,
         polys: &[&DensePolynomial<E::ScalarField>],
         z: E::ScalarField,
         gamma: E::ScalarField,
-    ) -> (Vec<E::ScalarField>, OpeningProof<E>) {
-        let values: Vec<_> = polys.iter().map(|p| p.evaluate(&z)).collect();
-        let folded = fold(polys, gamma);
-        let (q, _) = divide_by_linear(&folded, z);
-        (values, OpeningProof(self.commit(&q).0))
+    ) -> OpeningProof<E> {
+        self.open_at(&fold(polys, gamma), z)
     }
 }
 
@@ -274,10 +276,8 @@ mod tests {
 
         let z = Fr::rand(&mut rng);
         let gamma = Fr::rand(&mut rng);
-        let (values, proof) = srs.open_batch(&refs, z, gamma);
-        for (p, v) in polys.iter().zip(&values) {
-            assert_eq!(p.evaluate(&z), *v);
-        }
+        let proof = srs.open_batch(&refs, z, gamma);
+        let values: Vec<Fr> = polys.iter().map(|p| p.evaluate(&z)).collect();
         assert!(vk.verify_batch(&comms, z, &values, gamma, &proof));
 
         let mut bad = values.clone();
