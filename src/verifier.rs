@@ -9,6 +9,10 @@ use ark_ec::{pairing::Pairing, CurveGroup};
 use ark_ff::Zero;
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 
+/// Returns whether the proof is valid for these public inputs.
+///
+/// TODO: a `Result` with the failing check would help debugging; the pairing
+/// check is the only step that can't say why it failed.
 pub fn verify<E: Pairing>(
     vk: &VerifierKey<E>,
     public_inputs: &[E::ScalarField],

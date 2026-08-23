@@ -2,6 +2,8 @@
 //!
 //! The setup is a plain powers-of-tau with the secret sampled locally, which is
 //! only fine for tests. A real deployment needs an MPC ceremony.
+//! TODO: read the output of one (e.g. the Ethereum KZG ceremony's
+//! transcript) into an `Srs`; the powers are in the same form.
 
 use ark_ec::{
     pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, AffineRepr, CurveGroup,

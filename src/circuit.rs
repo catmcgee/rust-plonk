@@ -146,7 +146,8 @@ impl<F: Field> Circuit<F> {
         v
     }
 
-    /// A variable fixed to `k`.
+    /// A variable fixed to `k`. Every call is a new gate, even for the same
+    /// `k`; cache the result if you use a constant a lot.
     pub fn constant(&mut self, k: F) -> Variable {
         let v = self.alloc(k);
         // v - k = 0
@@ -320,6 +321,9 @@ impl<F: Field> Circuit<F> {
     }
 
     pub fn assert_equal(&mut self, x: Variable, y: Variable) {
+        // TODO: this spends a gate; merging the two variables' cycles in the
+        // permutation would do it for free, but `Variable` would need to be
+        // resolved through a union-find at preprocess time.
         // x - y = 0
         self.gate(
             x,
