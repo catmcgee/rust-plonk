@@ -1,6 +1,6 @@
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_std::test_rng;
-use plonk::{preprocess, prove, verify, Circuit, ProveError, Srs};
+use plonk::{preprocess, prove, verify, Circuit, ProveError, Srs, VerifyError};
 
 /// x^3 + x + 5 = y, with y public. The classic.
 fn cubic(x: u64, y: u64) -> Circuit<Fr> {
@@ -24,7 +24,7 @@ fn cubic_proves_and_verifies() {
     assert!(circuit.is_satisfied());
     let pk = preprocess(&circuit, &srs).unwrap();
     let proof = prove(&srs, &pk, &circuit, &mut rng).unwrap();
-    assert!(verify(&pk.vk, &circuit.public_inputs(), &proof));
+    assert!(verify(&pk.vk, &circuit.public_inputs(), &proof).is_ok());
 }
 
 #[test]
@@ -34,8 +34,17 @@ fn wrong_public_input_rejected() {
     let circuit = cubic(3, 35);
     let pk = preprocess(&circuit, &srs).unwrap();
     let proof = prove(&srs, &pk, &circuit, &mut rng).unwrap();
-    assert!(!verify(&pk.vk, &[Fr::from(36u64)], &proof));
-    assert!(!verify(&pk.vk, &[], &proof));
+    assert_eq!(
+        verify(&pk.vk, &[Fr::from(36u64)], &proof),
+        Err(VerifyError::PairingCheckFailed)
+    );
+    assert_eq!(
+        verify(&pk.vk, &[], &proof),
+        Err(VerifyError::PublicInputCount {
+            expected: 1,
+            got: 0
+        })
+    );
 }
 
 #[test]
@@ -63,27 +72,27 @@ fn tampered_proof_rejected() {
 
     let mut p = proof.clone();
     p.evals.a += Fr::from(1u64);
-    assert!(!verify(&pk.vk, &pi, &p));
+    assert!(verify(&pk.vk, &pi, &p).is_err());
 
     let mut p = proof.clone();
     p.evals.z_omega += Fr::from(1u64);
-    assert!(!verify(&pk.vk, &pi, &p));
+    assert!(verify(&pk.vk, &pi, &p).is_err());
 
     let mut p = proof.clone();
     p.evals.s_sigma1 = p.evals.s_sigma2;
-    assert!(!verify(&pk.vk, &pi, &p));
+    assert!(verify(&pk.vk, &pi, &p).is_err());
 
     let mut p = proof.clone();
     p.z = plonk::kzg::Commitment((p.z.0 + p.a.0).into());
-    assert!(!verify(&pk.vk, &pi, &p));
+    assert!(verify(&pk.vk, &pi, &p).is_err());
 
     let mut p = proof.clone();
     p.w_zeta = plonk::kzg::OpeningProof(p.w_zeta_omega.0);
-    assert!(!verify(&pk.vk, &pi, &p));
+    assert!(verify(&pk.vk, &pi, &p).is_err());
 
     let mut p = proof.clone();
     p.t_hi = plonk::kzg::Commitment(<Bls12_381 as ark_ec::pairing::Pairing>::G1Affine::zero());
-    assert!(!verify(&pk.vk, &pi, &p));
+    assert!(verify(&pk.vk, &pi, &p).is_err());
 }
 
 #[test]
@@ -105,7 +114,7 @@ fn proof_for_one_circuit_does_not_verify_for_another() {
     let s = other.add(s, six);
     other.assert_equal(s, y);
     let other_pk = preprocess(&other, &srs).unwrap();
-    assert!(!verify(&other_pk.vk, &[Fr::from(35u64)], &proof));
+    assert!(verify(&other_pk.vk, &[Fr::from(35u64)], &proof).is_err());
 }
 
 /// Two circuits with the same shape but different selectors must not share
@@ -152,8 +161,8 @@ fn a_few_hundred_gates() {
     let pk = preprocess(&c, &srs).unwrap();
     assert_eq!(pk.vk.n, 1024);
     let proof = prove(&srs, &pk, &c, &mut rng).unwrap();
-    assert!(verify(&pk.vk, &c.public_inputs(), &proof));
-    assert!(!verify(&pk.vk, &[Fr::from(1u64)], &proof));
+    assert!(verify(&pk.vk, &c.public_inputs(), &proof).is_ok());
+    assert!(verify(&pk.vk, &[Fr::from(1u64)], &proof).is_err());
 }
 
 #[test]
@@ -171,14 +180,17 @@ fn proof_round_trips_through_bytes() {
     assert_eq!(bytes.len(), 9 * 48 + 6 * 32);
     let back = Proof::<Bls12_381>::from_bytes(&bytes).unwrap();
     assert_eq!(back, proof);
-    assert!(verify(&pk.vk, &circuit.public_inputs(), &back));
+    assert!(verify(&pk.vk, &circuit.public_inputs(), &back).is_ok());
 
     // a flipped bit is either unparseable or an invalid proof
     for i in [0, 47, 48, 9 * 48 + 3, bytes.len() - 1] {
         let mut bad = bytes.clone();
         bad[i] ^= 1;
         if let Ok(p) = Proof::<Bls12_381>::from_bytes(&bad) {
-            assert!(!verify(&pk.vk, &circuit.public_inputs(), &p), "byte {i}");
+            assert!(
+                verify(&pk.vk, &circuit.public_inputs(), &p).is_err(),
+                "byte {i}"
+            );
         }
     }
     assert!(Proof::<Bls12_381>::from_bytes(&bytes[..bytes.len() - 1]).is_err());
@@ -187,7 +199,7 @@ fn proof_round_trips_through_bytes() {
     pk.vk.serialize_compressed(&mut vk_bytes).unwrap();
     let vk = VerifierKey::<Bls12_381>::deserialize_compressed(&vk_bytes[..]).unwrap();
     assert_eq!(vk, pk.vk);
-    assert!(verify(&vk, &circuit.public_inputs(), &proof));
+    assert!(verify(&vk, &circuit.public_inputs(), &proof).is_ok());
 }
 
 /// Violations that form a low-degree polynomial over the domain used to slip
@@ -212,7 +224,7 @@ fn low_degree_violation_pattern_is_rejected() {
         Err(ProveError::Unsatisfied) => {}
         Err(e) => panic!("unexpected error {e}"),
         Ok(proof) => panic!(
-            "proof produced for a bad witness, verifies: {}",
+            "proof produced for a bad witness, verifies: {:?}",
             verify(&pk.vk, &[], &proof)
         ),
     }

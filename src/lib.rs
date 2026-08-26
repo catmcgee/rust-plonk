@@ -16,4 +16,4 @@ pub use kzg::Srs;
 pub use preprocess::{preprocess, required_srs_degree, PreprocessError, ProverKey, VerifierKey};
 pub use proof::Proof;
 pub use prover::{prove, ProveError};
-pub use verifier::verify;
+pub use verifier::{verify, VerifyError};

@@ -47,11 +47,11 @@ fn random_circuits_prove_and_verify() {
         let pk = preprocess(&c, &srs).unwrap();
         let proof = prove(&srs, &pk, &c, &mut rng).unwrap();
         let pi = c.public_inputs();
-        assert!(verify(&pk.vk, &pi, &proof), "iteration {i}");
+        assert!(verify(&pk.vk, &pi, &proof).is_ok(), "iteration {i}");
         if !pi.is_empty() {
             let mut wrong = pi.clone();
             wrong[0] += Fr::from(1u64);
-            assert!(!verify(&pk.vk, &wrong, &proof), "iteration {i}");
+            assert!(verify(&pk.vk, &wrong, &proof).is_err(), "iteration {i}");
         }
     }
 }
@@ -64,8 +64,8 @@ fn no_public_inputs() {
     let pk = preprocess(&c, &srs).unwrap();
     assert_eq!(pk.vk.num_public_inputs, 0);
     let proof = prove(&srs, &pk, &c, &mut rng).unwrap();
-    assert!(verify(&pk.vk, &[], &proof));
-    assert!(!verify(&pk.vk, &[Fr::from(0u64)], &proof));
+    assert!(verify(&pk.vk, &[], &proof).is_ok());
+    assert!(verify(&pk.vk, &[Fr::from(0u64)], &proof).is_err());
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn exactly_a_power_of_two_gates() {
         let pk = preprocess(&c, &srs).unwrap();
         assert_eq!(pk.vk.n, n);
         let proof = prove(&srs, &pk, &c, &mut rng).unwrap();
-        assert!(verify(&pk.vk, &c.public_inputs(), &proof));
+        assert!(verify(&pk.vk, &c.public_inputs(), &proof).is_ok());
     }
 }
 
@@ -99,7 +99,7 @@ fn every_proof_field_matters() {
     let pk = preprocess(&c, &srs).unwrap();
     let proof = prove(&srs, &pk, &c, &mut rng).unwrap();
     let pi = c.public_inputs();
-    assert!(verify(&pk.vk, &pi, &proof));
+    assert!(verify(&pk.vk, &pi, &proof).is_ok());
 
     let other = prove(&srs, &pk, &c, &mut rng).unwrap();
     let swap_point = |p: &mut Commitment<Bls12_381>| *p = Commitment((p.0 + other.a.0).into());
@@ -130,7 +130,7 @@ fn every_proof_field_matters() {
         let mut p = proof.clone();
         mutate(&mut p);
         assert_ne!(p, proof, "{name} mutation was a no-op");
-        assert!(!verify(&pk.vk, &pi, &p), "{name}");
+        assert!(verify(&pk.vk, &pi, &p).is_err(), "{name}");
     }
 }
 
@@ -147,7 +147,7 @@ fn proofs_are_randomised() {
     assert_ne!(p1.a, p3.a);
     assert_ne!(p1.z, p3.z);
     assert_ne!(p1.evals.a, p3.evals.a);
-    assert!(verify(&pk.vk, &c.public_inputs(), &p3));
+    assert!(verify(&pk.vk, &c.public_inputs(), &p3).is_ok());
 }
 
 #[test]

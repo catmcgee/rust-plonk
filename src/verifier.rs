@@ -9,22 +9,54 @@ use ark_ec::{pairing::Pairing, CurveGroup};
 use ark_ff::Zero;
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 
-/// Returns whether the proof is valid for these public inputs.
-///
-/// TODO: a `Result` with the failing check would help debugging; the pairing
-/// check is the only step that can't say why it failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VerifyError {
+    PublicInputCount {
+        expected: usize,
+        got: usize,
+    },
+    /// The key's domain size isn't one the field supports.
+    BadDomain {
+        size: usize,
+    },
+    /// The evaluation point landed in the domain, which makes the identity
+    /// vacuous. Probability n / |F| for an honest prover.
+    ZetaInDomain,
+    /// The pairing equation didn't hold. This is where a wrong witness, a
+    /// tampered proof or wrong public inputs all end up.
+    PairingCheckFailed,
+}
+
+impl std::fmt::Display for VerifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VerifyError::PublicInputCount { expected, got } => {
+                write!(f, "got {got} public inputs, key expects {expected}")
+            }
+            VerifyError::BadDomain { size } => write!(f, "no evaluation domain of size {size}"),
+            VerifyError::ZetaInDomain => write!(f, "evaluation point is in the domain"),
+            VerifyError::PairingCheckFailed => write!(f, "pairing check failed"),
+        }
+    }
+}
+
+impl std::error::Error for VerifyError {}
+
+/// Check a proof against the key and public inputs.
 pub fn verify<E: Pairing>(
     vk: &VerifierKey<E>,
     public_inputs: &[E::ScalarField],
     proof: &Proof<E>,
-) -> bool {
+) -> Result<(), VerifyError> {
     if public_inputs.len() != vk.num_public_inputs {
-        return false;
+        return Err(VerifyError::PublicInputCount {
+            expected: vk.num_public_inputs,
+            got: public_inputs.len(),
+        });
     }
     let n = vk.n;
-    let Some(domain) = Radix2EvaluationDomain::<E::ScalarField>::new(n) else {
-        return false;
-    };
+    let domain = Radix2EvaluationDomain::<E::ScalarField>::new(n)
+        .ok_or(VerifyError::BadDomain { size: n })?;
     let omega = domain.group_gen();
     let ev = &proof.evals;
 
@@ -39,7 +71,7 @@ pub fn verify<E: Pairing>(
     // zeta in H would make Z_H(zeta) = 0 and the identity vacuous
     let (zeta_n, z_h, l1) = vanishing_at(n, zeta);
     if z_h.is_zero() {
-        return false;
+        return Err(VerifyError::ZetaInDomain);
     }
     // L_i(zeta) only for the first l rows, so the verifier stays O(l).
     let lagrange = lagrange_at(&domain, zeta, public_inputs.len());
@@ -79,7 +111,7 @@ pub fn verify<E: Pairing>(
     // r(zeta) = 0, i.e. D(zeta) = -r_0
     let folded_value = -r0 + v * ev.a + v2 * ev.b + v3 * ev.c + v4 * ev.s_sigma1 + v5 * ev.s_sigma2;
 
-    vk.kzg.verify_multi_point(
+    let ok = vk.kzg.verify_multi_point(
         &[
             Opening {
                 comm: Commitment(folded_comm.into_affine()),
@@ -95,5 +127,10 @@ pub fn verify<E: Pairing>(
             },
         ],
         u,
-    )
+    );
+    if ok {
+        Ok(())
+    } else {
+        Err(VerifyError::PairingCheckFailed)
+    }
 }

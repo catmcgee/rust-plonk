@@ -49,7 +49,7 @@ fn main() {
     );
 
     let t = Instant::now();
-    let ok = verify(&pk.vk, &circuit.public_inputs(), &proof);
+    let ok = verify(&pk.vk, &circuit.public_inputs(), &proof).is_ok();
     println!("verified in {:?}: {ok}", t.elapsed());
 
     let bad = factors(3_331_129 * 1_000_003, 1);

@@ -36,7 +36,7 @@ fn bench(c: &mut Criterion) {
         });
         let proof = prove(&srs, &pk, &circuit, &mut rng).unwrap();
         group.bench_with_input(BenchmarkId::new("verify", n), &n, |b, _| {
-            b.iter(|| assert!(verify(&pk.vk, &pi, &proof)))
+            b.iter(|| verify(&pk.vk, &pi, &proof).unwrap())
         });
     }
     group.finish();
