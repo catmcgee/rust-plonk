@@ -23,9 +23,9 @@ impl Permutation {
         assert!(n >= circuit.num_gates());
         let mut slots = vec![Variable::ZERO; 3 * n];
         for (row, g) in circuit.gates().iter().enumerate() {
-            slots[row] = g.a;
-            slots[n + row] = g.b;
-            slots[2 * n + row] = g.c;
+            slots[row] = circuit.root(g.a);
+            slots[n + row] = circuit.root(g.b);
+            slots[2 * n + row] = circuit.root(g.c);
         }
         Self::from_slots(&slots, n)
     }
@@ -150,9 +150,9 @@ mod tests {
         let p = Permutation::from_circuit(&c, n);
         let mut slots = vec![Variable::ZERO; 3 * n];
         for (row, g) in c.gates().iter().enumerate() {
-            slots[row] = g.a;
-            slots[n + row] = g.b;
-            slots[2 * n + row] = g.c;
+            slots[row] = c.root(g.a);
+            slots[n + row] = c.root(g.b);
+            slots[2 * n + row] = c.root(g.c);
         }
         for (pos, &next) in p.sigma().iter().enumerate() {
             assert_eq!(slots[pos], slots[next]);

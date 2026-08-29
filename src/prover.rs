@@ -482,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn bad_witness_has_remainder() {
+    fn broken_copy_constraint_fails_in_the_accumulator() {
         let mut rng = test_rng();
         let srs = Srs::<Bls12_381>::setup(32, &mut rng);
         let mut c = Circuit::<Fr>::new();
@@ -493,8 +493,27 @@ mod tests {
         c.assert_equal(xy, k);
         let pk = preprocess(&c, &srs).unwrap();
         let w = Witness::from_circuit(&c, pk.domain.size());
+        let (beta, gamma) = (Fr::rand(&mut rng), Fr::rand(&mut rng));
+        assert_eq!(
+            accumulator(&pk, &w, beta, gamma, &mut rng).err(),
+            Some(ProveError::Unsatisfied)
+        );
+    }
+
+    #[test]
+    fn bad_witness_has_remainder() {
+        let mut rng = test_rng();
+        let srs = Srs::<Bls12_381>::setup(32, &mut rng);
+        let mut c = Circuit::<Fr>::new();
+        let x = c.alloc(Fr::from(3u64));
+        let y = c.alloc(Fr::from(4u64));
+        let xy = c.mul(x, y);
+        c.assert_const(xy, Fr::from(13u64));
+        let pk = preprocess(&c, &srs).unwrap();
+        let w = Witness::from_circuit(&c, pk.domain.size());
         let (beta, gamma, alpha) = (Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng));
         let wires = wire_polys(&pk, &w, &mut rng);
+        // copy constraints hold, only a gate is violated
         let z = accumulator(&pk, &w, beta, gamma, &mut rng).unwrap();
         let pi = public_input_poly(&pk.domain, &[]);
         assert_eq!(

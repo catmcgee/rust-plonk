@@ -73,12 +73,11 @@ fn exactly_a_power_of_two_gates() {
     let mut rng = ChaCha20Rng::seed_from_u64(3);
     let srs = Srs::<Bls12_381>::setup(required_srs_degree(64), &mut rng);
     for n in [8usize, 16, 64] {
-        // Circuit::new adds one gate; each public input adds a gate and an
-        // assert_equal adds another.
+        // Circuit::new adds one gate and the public input another
         let mut c = Circuit::<Fr>::new();
         let x = c.alloc(Fr::from(7u64));
         let mut acc = x;
-        for _ in 0..n - 3 {
+        for _ in 0..n - 2 {
             acc = c.mul(acc, x);
         }
         let out = c.public_input(c.value(acc));

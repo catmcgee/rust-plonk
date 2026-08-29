@@ -13,6 +13,7 @@
 //! `q_C`, so the verifier can supply it.
 
 use ark_ff::Field;
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Variable(pub(crate) usize);
@@ -42,6 +43,10 @@ pub struct Circuit<F: Field> {
     /// Witness assignment, indexed by `Variable`.
     values: Vec<F>,
     public_inputs: Vec<Variable>,
+    /// Union-find over variables. `assert_equal` merges two variables so
+    /// their wire slots end up in one permutation cycle, costing no gate.
+    parent: Vec<usize>,
+    constants: HashMap<F, Variable>,
 }
 
 impl<F: Field> Circuit<F> {
@@ -51,6 +56,8 @@ impl<F: Field> Circuit<F> {
             gates: Vec::new(),
             values: vec![F::zero()],
             public_inputs: Vec::new(),
+            parent: vec![0],
+            constants: HashMap::new(),
         };
         // 1 * zero + 0 = 0
         c.gate(
@@ -91,9 +98,20 @@ impl<F: Field> Circuit<F> {
         self.values[v.0]
     }
 
+    /// The representative of `v`'s equivalence class under `assert_equal`.
+    /// This is what the permutation argument sees.
+    pub fn root(&self, v: Variable) -> Variable {
+        let mut i = v.0;
+        while self.parent[i] != i {
+            i = self.parent[i];
+        }
+        Variable(i)
+    }
+
     /// Allocate an unconstrained witness variable.
     pub fn alloc(&mut self, value: F) -> Variable {
         self.values.push(value);
+        self.parent.push(self.values.len() - 1);
         Variable(self.values.len() - 1)
     }
 
@@ -146,10 +164,13 @@ impl<F: Field> Circuit<F> {
         v
     }
 
-    /// A variable fixed to `k`. Every call is a new gate, even for the same
-    /// `k`; cache the result if you use a constant a lot.
+    /// A variable fixed to `k`. Repeated constants share one variable.
     pub fn constant(&mut self, k: F) -> Variable {
+        if let Some(v) = self.constants.get(&k) {
+            return *v;
+        }
         let v = self.alloc(k);
+        self.constants.insert(k, v);
         // v - k = 0
         self.gate(
             v,
@@ -320,32 +341,29 @@ impl<F: Field> Circuit<F> {
         out
     }
 
+    /// Constrain `x == y`. Free: the two variables are merged, so every
+    /// wire slot referring to either lands in the same copy cycle.
     pub fn assert_equal(&mut self, x: Variable, y: Variable) {
-        // TODO: this spends a gate; merging the two variables' cycles in the
-        // permutation would do it for free, but `Variable` would need to be
-        // resolved through a union-find at preprocess time.
-        // x - y = 0
-        self.gate(
-            x,
-            y,
-            Variable::ZERO,
-            F::one(),
-            -F::one(),
-            F::zero(),
-            F::zero(),
-            F::zero(),
-        );
+        let (rx, ry) = (self.root(x), self.root(y));
+        if rx != ry {
+            self.parent[ry.0] = rx.0;
+        }
     }
 
     /// Check every gate against the current assignment. Useful in tests; the
     /// prover doesn't rely on it.
     pub fn is_satisfied(&self) -> bool {
+        let merged_agree = (0..self.values.len()).all(|i| {
+            let v = Variable(i);
+            self.value(v) == self.value(self.root(v))
+        });
         let pi = self.public_inputs();
-        self.gates.iter().enumerate().all(|(i, g)| {
-            let (a, b, c) = (self.value(g.a), self.value(g.b), self.value(g.c));
-            let pi_i = pi.get(i).map_or(F::zero(), |x| -*x);
-            (g.q_l * a + g.q_r * b + g.q_o * c + g.q_m * a * b + g.q_c + pi_i).is_zero()
-        })
+        merged_agree
+            && self.gates.iter().enumerate().all(|(i, g)| {
+                let (a, b, c) = (self.value(g.a), self.value(g.b), self.value(g.c));
+                let pi_i = pi.get(i).map_or(F::zero(), |x| -*x);
+                (g.q_l * a + g.q_r * b + g.q_o * c + g.q_m * a * b + g.q_c + pi_i).is_zero()
+            })
     }
 }
 
@@ -371,6 +389,26 @@ mod tests {
         c.assert_equal(s, fifteen);
         assert!(c.is_satisfied());
         assert_eq!(c.value(s), Fr::from(15u64));
+        assert_eq!(c.root(s), c.root(fifteen));
+        assert_eq!(c.constant(Fr::from(15u64)), fifteen);
+    }
+
+    #[test]
+    fn merged_variables_must_agree() {
+        let mut c = Circuit::<Fr>::new();
+        let x = c.alloc(Fr::from(3u64));
+        let y = c.alloc(Fr::from(4u64));
+        assert!(c.is_satisfied());
+        c.assert_equal(x, y);
+        assert!(!c.is_satisfied());
+        // chains resolve to one root
+        let mut c = Circuit::<Fr>::new();
+        let vs: Vec<_> = (0..5).map(|_| c.alloc(Fr::from(9u64))).collect();
+        for w in vs.windows(2) {
+            c.assert_equal(w[1], w[0]);
+        }
+        assert!(vs.iter().all(|v| c.root(*v) == c.root(vs[0])));
+        assert!(c.is_satisfied());
     }
 
     #[test]
