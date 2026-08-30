@@ -1,9 +1,8 @@
 //! KZG polynomial commitments over a pairing-friendly curve.
 //!
-//! The setup is a plain powers-of-tau with the secret sampled locally, which is
-//! only fine for tests. A real deployment needs an MPC ceremony.
-//! TODO: read the output of one (e.g. the Ethereum KZG ceremony's
-//! transcript) into an `Srs`; the powers are in the same form.
+//! `Srs::setup` is a plain powers-of-tau with the secret sampled locally,
+//! which is only fine for tests. `Srs::from_ceremony_text` reads the output
+//! of the Ethereum KZG ceremony instead, in the text format c-kzg ships.
 
 use ark_ec::{
     pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, AffineRepr, CurveGroup,
@@ -45,7 +44,124 @@ pub struct Opening<E: Pairing> {
     pub proof: OpeningProof<E>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SrsError {
+    Parse(String),
+    /// The powers aren't consecutive powers of the same `tau` as `tau_h`.
+    Inconsistent,
+}
+
+impl std::fmt::Display for SrsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SrsError::Parse(m) => write!(f, "parse error: {m}"),
+            SrsError::Inconsistent => write!(f, "srs powers are inconsistent"),
+        }
+    }
+}
+
+impl std::error::Error for SrsError {}
+
 impl<E: Pairing> Srs<E> {
+    /// Build from points produced elsewhere, checking they are consistent:
+    /// `e(sum r_i g_i, tau h) == e(sum r_i g_{i+1}, h)` for random `r_i`
+    /// says every `g_{i+1} = tau g_i`, and `h, tau_h` match.
+    pub fn from_powers<R: RngCore>(
+        powers_of_g: Vec<E::G1Affine>,
+        h: E::G2Affine,
+        tau_h: E::G2Affine,
+        rng: &mut R,
+    ) -> Result<Self, SrsError> {
+        if powers_of_g.len() < 2 {
+            return Err(SrsError::Parse("need at least two G1 powers".into()));
+        }
+        let rs: Vec<E::ScalarField> = (1..powers_of_g.len())
+            .map(|_| E::ScalarField::rand(rng))
+            .collect();
+        let lo = E::G1::msm_unchecked(&powers_of_g[..rs.len()], &rs);
+        let hi = E::G1::msm_unchecked(&powers_of_g[1..], &rs);
+        if !E::multi_pairing([lo, -hi], [tau_h, h]).0.is_one() {
+            return Err(SrsError::Inconsistent);
+        }
+        Ok(Srs {
+            powers_of_g,
+            h,
+            tau_h,
+        })
+    }
+
+    /// Parse the trusted setup file shipped with c-kzg-4844 (the Ethereum
+    /// KZG ceremony output). Format: a line with the number of G1 points,
+    /// a line with the number of G2 points, the G1 points in Lagrange form,
+    /// the G2 powers, then the G1 points in monomial form, one compressed
+    /// point in hex per line. Older files stop after the G2 section; then
+    /// the first section is taken as monomial and the consistency check in
+    /// [`Srs::from_powers`] decides whether that was right.
+    pub fn from_ceremony_text<R: RngCore>(text: &str, rng: &mut R) -> Result<Self, SrsError> {
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        let count = |i: usize, what: &str| -> Result<usize, SrsError> {
+            lines
+                .get(i)
+                .ok_or_else(|| SrsError::Parse(format!("missing {what} count")))?
+                .parse::<usize>()
+                .map_err(|e| SrsError::Parse(format!("bad {what} count: {e}")))
+        };
+        let n_g1 = count(0, "g1")?;
+        let n_g2 = count(1, "g2")?;
+        if n_g2 < 2 {
+            return Err(SrsError::Parse("need [1]_2 and [tau]_2".into()));
+        }
+        let bytes = |i: usize, what: &str| -> Result<Vec<u8>, SrsError> {
+            let line = lines
+                .get(i)
+                .ok_or_else(|| SrsError::Parse(format!("file ends inside {what}")))?;
+            decode_hex(line).ok_or_else(|| SrsError::Parse(format!("bad hex in {what}")))
+        };
+        let g1_section = |start: usize, what: &str| {
+            (start..start + n_g1)
+                .map(|i| {
+                    E::G1Affine::deserialize_compressed(&bytes(i, what)?[..])
+                        .map_err(|e| SrsError::Parse(format!("bad g1 point: {e}")))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let lagrange = g1_section(2, "g1 lagrange")?;
+        let g2 = (2 + n_g1..2 + n_g1 + n_g2)
+            .map(|i| {
+                E::G2Affine::deserialize_compressed(&bytes(i, "g2")?[..])
+                    .map_err(|e| SrsError::Parse(format!("bad g2 point: {e}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let g1 = if lines.len() > 2 + n_g1 + n_g2 {
+            g1_section(2 + n_g1 + n_g2, "g1 monomial")?
+        } else {
+            lagrange
+        };
+        Self::from_powers(g1, g2[0], g2[1], rng)
+    }
+
+    /// Inverse of [`Srs::from_ceremony_text`], in the short layout: the
+    /// monomial G1 powers in the first section, then the two G2 points.
+    pub fn to_ceremony_text(&self) -> String {
+        fn line<T: CanonicalSerialize>(p: &T) -> String {
+            let mut bytes = Vec::new();
+            p.serialize_compressed(&mut bytes)
+                .expect("writing to a Vec");
+            encode_hex(&bytes) + "\n"
+        }
+        let mut out = format!("{}\n2\n", self.powers_of_g.len());
+        for g in &self.powers_of_g {
+            out += &line(g);
+        }
+        out += &line(&self.h);
+        out += &line(&self.tau_h);
+        out
+    }
+
     /// Sample a fresh `tau` and compute powers up to `max_degree`, over the
     /// curve's standard generators so the result looks like a real ceremony's.
     pub fn setup<R: RngCore>(max_degree: usize, rng: &mut R) -> Self {
@@ -205,6 +321,21 @@ impl<E: Pairing> VerifierKey<E> {
     }
 }
 
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Divide `p` by `(X - z)`. Returns `(quotient, remainder)`; the remainder is `p(z)`.
 pub fn divide_by_linear<F: Field>(p: &DensePolynomial<F>, z: F) -> (DensePolynomial<F>, F) {
     if p.is_zero() {
@@ -310,6 +441,58 @@ mod tests {
         assert!(!vk.verify_multi_point(&[op(cp, z1, vp, wp), op(cq, z2, vq + Fr::one(), wq)], u));
         assert!(!vk.verify_multi_point(&[op(cp, z1, vp, wq), op(cq, z2, vq, wp)], u));
         assert!(!vk.verify_multi_point(&[op(cp, z2, vp, wp), op(cq, z1, vq, wq)], u));
+    }
+
+    #[test]
+    fn ceremony_text_round_trip() {
+        let mut rng = test_rng();
+        let srs = Srs::<Bls12_381>::setup(20, &mut rng);
+        let text = srs.to_ceremony_text();
+        assert!(text.starts_with("21\n2\n"));
+        let back = Srs::<Bls12_381>::from_ceremony_text(&text, &mut rng).unwrap();
+        assert_eq!(back.powers_of_g, srs.powers_of_g);
+        assert_eq!((back.h, back.tau_h), (srs.h, srs.tau_h));
+
+        // a power from a different tau is caught
+        let other = Srs::<Bls12_381>::setup(20, &mut rng);
+        let mut powers = srs.powers_of_g.clone();
+        powers[7] = other.powers_of_g[7];
+        assert_eq!(
+            Srs::<Bls12_381>::from_powers(powers, srs.h, srs.tau_h, &mut rng).err(),
+            Some(SrsError::Inconsistent)
+        );
+        assert_eq!(
+            Srs::<Bls12_381>::from_powers(srs.powers_of_g.clone(), srs.h, other.tau_h, &mut rng)
+                .err(),
+            Some(SrsError::Inconsistent)
+        );
+
+        // garbage
+        assert!(matches!(
+            Srs::<Bls12_381>::from_ceremony_text("2\n2\nzz\n", &mut rng),
+            Err(SrsError::Parse(_))
+        ));
+        assert!(matches!(
+            Srs::<Bls12_381>::from_ceremony_text(&text[..text.len() - 10], &mut rng),
+            Err(SrsError::Parse(_))
+        ));
+    }
+
+    /// Run with the real file: `TRUSTED_SETUP=path cargo test ceremony_file`
+    #[test]
+    fn ceremony_file() {
+        let Ok(path) = std::env::var("TRUSTED_SETUP") else {
+            return;
+        };
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut rng = test_rng();
+        let srs = Srs::<Bls12_381>::from_ceremony_text(&text, &mut rng).unwrap();
+        assert_eq!(srs.max_degree(), 4095);
+        let p = DensePolynomial::<Fr>::rand(4000, &mut rng);
+        let c = srs.commit(&p);
+        let z = Fr::rand(&mut rng);
+        let (v, proof) = srs.open(&p, z);
+        assert!(srs.verifier_key().verify(&c, z, v, &proof));
     }
 
     #[test]

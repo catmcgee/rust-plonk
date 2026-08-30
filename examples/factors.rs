@@ -37,7 +37,17 @@ fn main() {
         circuit.is_satisfied()
     );
 
-    let srs = Srs::<Bls12_381>::setup(512, &mut rng);
+    // With TRUSTED_SETUP pointing at c-kzg's trusted_setup.txt the proof is
+    // made against the Ethereum ceremony rather than a locally sampled tau.
+    let srs = match std::env::var("TRUSTED_SETUP") {
+        Ok(path) => {
+            let text = std::fs::read_to_string(path).expect("read trusted setup");
+            let srs = Srs::<Bls12_381>::from_ceremony_text(&text, &mut rng).expect("parse");
+            println!("using ceremony srs, degree {}", srs.max_degree());
+            srs
+        }
+        Err(_) => Srs::<Bls12_381>::setup(512, &mut rng),
+    };
     let pk = preprocess(&circuit, &srs).unwrap();
 
     let t = Instant::now();
