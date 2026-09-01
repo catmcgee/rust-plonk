@@ -200,8 +200,7 @@ pub fn quotient<E: Pairing, R: RngCore>(
 
     let one = E::ScalarField::one();
     let alpha2 = alpha * alpha;
-    let mut t = Vec::with_capacity(m);
-    for i in 0..m {
+    let row = |i: usize| {
         let x = xs[i];
         let gate =
             a[i] * b[i] * q_m[i] + a[i] * q_l[i] + b[i] * q_r[i] + c[i] * q_o[i] + q_c[i] + pi[i];
@@ -213,8 +212,15 @@ pub fn quotient<E: Pairing, R: RngCore>(
             * (c[i] + beta * s3[i] + gamma);
         let perm = f * zz[i] - g * z_w(i);
         let start = (zz[i] - one) * l1[i];
-        t.push((gate + alpha * perm + alpha2 * start) * pk.z_h_inv_coset[i % 4]);
-    }
+        (gate + alpha * perm + alpha2 * start) * pk.z_h_inv_coset[i % 4]
+    };
+    #[cfg(feature = "parallel")]
+    let t: Vec<E::ScalarField> = {
+        use rayon::prelude::*;
+        (0..m).into_par_iter().map(row).collect()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let t: Vec<E::ScalarField> = (0..m).map(row).collect();
     let mut coeffs = coset.ifft(&t);
     // If the constraints hold the numerator is divisible by Z_H and t has
     // degree at most 3n+5. If they don't, the pointwise division gives some
