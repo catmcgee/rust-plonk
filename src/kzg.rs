@@ -66,17 +66,25 @@ impl<E: Pairing> Srs<E> {
     /// Build from points produced elsewhere, checking they are consistent:
     /// `e(sum r_i g_i, tau h) == e(sum r_i g_{i+1}, h)` for random `r_i`
     /// says every `g_{i+1} = tau g_i`, and `h, tau_h` match.
-    pub fn from_powers<R: RngCore>(
+    ///
+    /// The `r_i` come from the OS rng, not from the caller: whoever made the
+    /// points must not be able to predict them. Degenerate setups (identity
+    /// generators, tau in {0, 1}) pass the pairing equation trivially and
+    /// are rejected separately.
+    pub fn from_powers(
         powers_of_g: Vec<E::G1Affine>,
         h: E::G2Affine,
         tau_h: E::G2Affine,
-        rng: &mut R,
     ) -> Result<Self, SrsError> {
         if powers_of_g.len() < 2 {
             return Err(SrsError::Parse("need at least two G1 powers".into()));
         }
+        if h.is_zero() || tau_h.is_zero() || tau_h == h || powers_of_g[0].is_zero() {
+            return Err(SrsError::Inconsistent);
+        }
+        let mut rng = rand::rngs::OsRng;
         let rs: Vec<E::ScalarField> = (1..powers_of_g.len())
-            .map(|_| E::ScalarField::rand(rng))
+            .map(|_| E::ScalarField::rand(&mut rng))
             .collect();
         let lo = E::G1::msm_unchecked(&powers_of_g[..rs.len()], &rs);
         let hi = E::G1::msm_unchecked(&powers_of_g[1..], &rs);
@@ -94,10 +102,10 @@ impl<E: Pairing> Srs<E> {
     /// KZG ceremony output). Format: a line with the number of G1 points,
     /// a line with the number of G2 points, the G1 points in Lagrange form,
     /// the G2 powers, then the G1 points in monomial form, one compressed
-    /// point in hex per line. Older files stop after the G2 section; then
-    /// the first section is taken as monomial and the consistency check in
-    /// [`Srs::from_powers`] decides whether that was right.
-    pub fn from_ceremony_text<R: RngCore>(text: &str, rng: &mut R) -> Result<Self, SrsError> {
+    /// point in hex per line. Files with only one G1 section are taken to
+    /// hold monomial points (the layout [`Srs::to_ceremony_text`] writes);
+    /// an old Lagrange-only file then fails the consistency check.
+    pub fn from_ceremony_text(text: &str) -> Result<Self, SrsError> {
         let lines: Vec<&str> = text
             .lines()
             .map(str::trim)
@@ -114,6 +122,19 @@ impl<E: Pairing> Srs<E> {
         let n_g2 = count(1, "g2")?;
         if n_g2 < 2 {
             return Err(SrsError::Parse("need [1]_2 and [tau]_2".into()));
+        }
+        let short = 2usize
+            .checked_add(n_g1)
+            .and_then(|x| x.checked_add(n_g2))
+            .ok_or_else(|| SrsError::Parse("counts overflow".into()))?;
+        let long = short
+            .checked_add(n_g1)
+            .ok_or_else(|| SrsError::Parse("counts overflow".into()))?;
+        if lines.len() != short && lines.len() != long {
+            return Err(SrsError::Parse(format!(
+                "expected {short} or {long} lines for {n_g1} G1 and {n_g2} G2 points, got {}",
+                lines.len()
+            )));
         }
         let bytes = |i: usize, what: &str| -> Result<Vec<u8>, SrsError> {
             let line = lines
@@ -136,12 +157,12 @@ impl<E: Pairing> Srs<E> {
                     .map_err(|e| SrsError::Parse(format!("bad g2 point: {e}")))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let g1 = if lines.len() > 2 + n_g1 + n_g2 {
-            g1_section(2 + n_g1 + n_g2, "g1 monomial")?
+        let g1 = if lines.len() == long {
+            g1_section(short, "g1 monomial")?
         } else {
             lagrange
         };
-        Self::from_powers(g1, g2[0], g2[1], rng)
+        Self::from_powers(g1, g2[0], g2[1])
     }
 
     /// Inverse of [`Srs::from_ceremony_text`], in the short layout: the
@@ -323,12 +344,12 @@ impl<E: Pairing> VerifierKey<E> {
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
     let s = s.strip_prefix("0x").unwrap_or(s);
-    if s.len() % 2 != 0 {
+    if !s.is_ascii() || s.len() % 2 != 0 {
         return None;
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+    s.as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
         .collect()
 }
 
@@ -449,7 +470,7 @@ mod tests {
         let srs = Srs::<Bls12_381>::setup(20, &mut rng);
         let text = srs.to_ceremony_text();
         assert!(text.starts_with("21\n2\n"));
-        let back = Srs::<Bls12_381>::from_ceremony_text(&text, &mut rng).unwrap();
+        let back = Srs::<Bls12_381>::from_ceremony_text(&text).unwrap();
         assert_eq!(back.powers_of_g, srs.powers_of_g);
         assert_eq!((back.h, back.tau_h), (srs.h, srs.tau_h));
 
@@ -458,22 +479,42 @@ mod tests {
         let mut powers = srs.powers_of_g.clone();
         powers[7] = other.powers_of_g[7];
         assert_eq!(
-            Srs::<Bls12_381>::from_powers(powers, srs.h, srs.tau_h, &mut rng).err(),
+            Srs::<Bls12_381>::from_powers(powers, srs.h, srs.tau_h).err(),
             Some(SrsError::Inconsistent)
         );
         assert_eq!(
-            Srs::<Bls12_381>::from_powers(srs.powers_of_g.clone(), srs.h, other.tau_h, &mut rng)
-                .err(),
+            Srs::<Bls12_381>::from_powers(srs.powers_of_g.clone(), srs.h, other.tau_h).err(),
             Some(SrsError::Inconsistent)
         );
 
-        // garbage
+        // degenerate: everything the identity, or tau = 1
+        use ark_ec::AffineRepr;
+        let zero_g1 = <Bls12_381 as Pairing>::G1Affine::zero();
+        let zero_g2 = <Bls12_381 as Pairing>::G2Affine::zero();
+        assert_eq!(
+            Srs::<Bls12_381>::from_powers(vec![zero_g1; 3], zero_g2, zero_g2).err(),
+            Some(SrsError::Inconsistent)
+        );
+        assert_eq!(
+            Srs::<Bls12_381>::from_powers(vec![srs.powers_of_g[0]; 3], srs.h, srs.h).err(),
+            Some(SrsError::Inconsistent)
+        );
+        // trailing junk and non-ascii
         assert!(matches!(
-            Srs::<Bls12_381>::from_ceremony_text("2\n2\nzz\n", &mut rng),
+            Srs::<Bls12_381>::from_ceremony_text(&(text.clone() + "checksum\n")),
             Err(SrsError::Parse(_))
         ));
         assert!(matches!(
-            Srs::<Bls12_381>::from_ceremony_text(&text[..text.len() - 10], &mut rng),
+            Srs::<Bls12_381>::from_ceremony_text(&text.replacen("a", "\u{e9}", 1)),
+            Err(SrsError::Parse(_))
+        ));
+        // garbage
+        assert!(matches!(
+            Srs::<Bls12_381>::from_ceremony_text("2\n2\nzz\nzz\nzz\nzz\n"),
+            Err(SrsError::Parse(_))
+        ));
+        assert!(matches!(
+            Srs::<Bls12_381>::from_ceremony_text(&text[..text.len() - 10]),
             Err(SrsError::Parse(_))
         ));
     }
@@ -486,7 +527,7 @@ mod tests {
         };
         let text = std::fs::read_to_string(path).unwrap();
         let mut rng = test_rng();
-        let srs = Srs::<Bls12_381>::from_ceremony_text(&text, &mut rng).unwrap();
+        let srs = Srs::<Bls12_381>::from_ceremony_text(&text).unwrap();
         assert_eq!(srs.max_degree(), 4095);
         let p = DensePolynomial::<Fr>::rand(4000, &mut rng);
         let c = srs.commit(&p);

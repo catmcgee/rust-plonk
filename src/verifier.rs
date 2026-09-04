@@ -1,8 +1,9 @@
 //! The verifier, following section 8.4 of the paper.
 
 use crate::kzg::{Commitment, Opening};
+use crate::permutation::coset_generators;
 use crate::poly::{lagrange_at, vanishing_at};
-use crate::preprocess::VerifierKey;
+use crate::preprocess::{VerifierKey, MIN_DOMAIN_SIZE};
 use crate::proof::Proof;
 use crate::rounds::Rounds;
 use ark_ec::{pairing::Pairing, CurveGroup};
@@ -15,10 +16,9 @@ pub enum VerifyError {
         expected: usize,
         got: usize,
     },
-    /// The key's domain size isn't one the field supports.
-    BadDomain {
-        size: usize,
-    },
+    /// The key's domain size isn't a usable power of two, or it declares
+    /// more public inputs than rows.
+    BadKey,
     /// The evaluation point landed in the domain, which makes the identity
     /// vacuous. Probability n / |F| for an honest prover.
     ZetaInDomain,
@@ -33,7 +33,7 @@ impl std::fmt::Display for VerifyError {
             VerifyError::PublicInputCount { expected, got } => {
                 write!(f, "got {got} public inputs, key expects {expected}")
             }
-            VerifyError::BadDomain { size } => write!(f, "no evaluation domain of size {size}"),
+            VerifyError::BadKey => write!(f, "malformed verifier key"),
             VerifyError::ZetaInDomain => write!(f, "evaluation point is in the domain"),
             VerifyError::PairingCheckFailed => write!(f, "pairing check failed"),
         }
@@ -54,9 +54,18 @@ pub fn verify<E: Pairing>(
             got: public_inputs.len(),
         });
     }
+    // The key may have come off the wire. `Radix2EvaluationDomain::new`
+    // silently rounds up to a power of two, so check n ourselves.
     let n = vk.n;
-    let domain = Radix2EvaluationDomain::<E::ScalarField>::new(n)
-        .ok_or(VerifyError::BadDomain { size: n })?;
+    if !n.is_power_of_two() || n < MIN_DOMAIN_SIZE || vk.num_public_inputs > n {
+        return Err(VerifyError::BadKey);
+    }
+    let domain = Radix2EvaluationDomain::<E::ScalarField>::new(n).ok_or(VerifyError::BadKey)?;
+    // k1, k2 are a function of n; a key that says otherwise would let
+    // columns share labels and copy constraints across them vanish.
+    if coset_generators(&domain) != (vk.k1, vk.k2) {
+        return Err(VerifyError::BadKey);
+    }
     let omega = domain.group_gen();
     let ev = &proof.evals;
 

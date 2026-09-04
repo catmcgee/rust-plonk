@@ -363,7 +363,8 @@ pub fn prove<E: Pairing, R: RngCore>(
         zeta,
     );
     if !r.evaluate(&zeta).is_zero() {
-        // Can't happen if the checks above passed; refuse to emit garbage.
+        // Reachable if `pk` wasn't built from this circuit: the checks above
+        // only compare sizes. Refuse to emit a proof that can't verify.
         return Err(ProveError::Unsatisfied);
     }
     let w_zeta = srs.open_batch(

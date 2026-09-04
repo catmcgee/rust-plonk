@@ -64,7 +64,7 @@ impl<E: Pairing> VerifierKey<E> {
     /// independent of the circuit, which would let a prover who picks the
     /// circuit pick selectors that satisfy an arbitrary "proof".
     pub fn transcript(&self, public_inputs: &[E::ScalarField]) -> Transcript {
-        let mut t = Transcript::new(b"plonk");
+        let mut t = Transcript::new(b"plonk v1 kzg bls12-381");
         t.absorb(b"n", &(self.n as u64));
         t.absorb(b"k1", &self.k1);
         t.absorb(b"k2", &self.k2);

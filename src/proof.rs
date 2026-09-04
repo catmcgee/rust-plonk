@@ -65,6 +65,11 @@ impl<E: Pairing> Proof<E> {
     /// Parse and validate. Fails on malformed input, points off the curve
     /// or outside the subgroup, and non-canonical field elements.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, SerializationError> {
-        Self::deserialize_with_mode(bytes, Compress::Yes, Validate::Yes)
+        let mut cursor = bytes;
+        let proof = Self::deserialize_with_mode(&mut cursor, Compress::Yes, Validate::Yes)?;
+        if !cursor.is_empty() {
+            return Err(SerializationError::InvalidData);
+        }
+        Ok(proof)
     }
 }

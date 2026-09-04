@@ -15,12 +15,15 @@ pub fn interpolate<F: FftField>(
 
 /// `zeta^n`, `Z_H(zeta) = zeta^n - 1` and `L_0(zeta)`.
 ///
-/// `Z_H(zeta)` is zero exactly when `zeta` is in the domain, in which case
-/// `L_0` is undefined and the caller must bail out.
+/// `Z_H(zeta)` is zero exactly when `zeta` is in the domain; `L_0` is then
+/// reported as zero (it's really undefined at `zeta = 1`) and the caller
+/// must bail out on `Z_H(zeta) == 0`.
 pub fn vanishing_at<F: FftField>(n: usize, zeta: F) -> (F, F, F) {
     let zeta_n = zeta.pow([n as u64]);
     let z_h = zeta_n - F::one();
-    let l0 = z_h / (F::from(n as u64) * (zeta - F::one()));
+    let l0 = (F::from(n as u64) * (zeta - F::one()))
+        .inverse()
+        .map_or(F::zero(), |inv| z_h * inv);
     (zeta_n, z_h, l0)
 }
 
@@ -48,7 +51,7 @@ pub fn lagrange_at<F: FftField>(
 mod tests {
     use super::*;
     use ark_bls12_381::Fr;
-    use ark_ff::UniformRand;
+    use ark_ff::{UniformRand, Zero};
     use ark_std::test_rng;
 
     #[test]
@@ -62,5 +65,8 @@ mod tests {
         let (_, z_h, l0) = vanishing_at(16, zeta);
         assert_eq!(l0, all[0]);
         assert_eq!(z_h, domain.evaluate_vanishing_polynomial(zeta));
+        // no panic at zeta = 1
+        let (_, z_h, _) = vanishing_at(16, Fr::from(1u64));
+        assert!(z_h.is_zero());
     }
 }

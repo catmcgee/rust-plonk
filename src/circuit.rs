@@ -256,10 +256,9 @@ impl<F: Field> Circuit<F> {
         z
     }
 
-    /// `x * y + z`, in one gate.
+    /// `x * y + z`. Two gates, since a row only has three wires.
     pub fn mul_add(&mut self, x: Variable, y: Variable, z: Variable) -> Variable {
         let out = self.alloc(self.value(x) * self.value(y) + self.value(z));
-        // x*y + z - out = 0 ... but that needs four wires. Use two gates.
         // TODO: a wider gate would make this one row.
         let xy = self.mul(x, y);
         self.gate(
@@ -305,11 +304,19 @@ impl<F: Field> Circuit<F> {
 
     /// Split `x` into `bits` little-endian bits, each constrained boolean,
     /// and constrain the recomposition. Fails the circuit if `x` doesn't fit.
+    ///
+    /// `bits` must be below the field's bit size, otherwise `x` and `x + p`
+    /// would both decompose and this would stop being a range check.
     pub fn to_bits(&mut self, x: Variable, bits: usize) -> Vec<Variable>
     where
         F: ark_ff::PrimeField,
     {
         use ark_ff::BigInteger;
+        assert!(
+            bits < F::MODULUS_BIT_SIZE as usize,
+            "{bits} bits can't be a range check in a {}-bit field",
+            F::MODULUS_BIT_SIZE
+        );
         let value = self.value(x).into_bigint();
         let mut out = Vec::with_capacity(bits);
         let mut acc = Variable::ZERO;
@@ -345,13 +352,19 @@ impl<F: Field> Circuit<F> {
     /// wire slot referring to either lands in the same copy cycle.
     pub fn assert_equal(&mut self, x: Variable, y: Variable) {
         let (rx, ry) = (self.root(x), self.root(y));
-        if rx != ry {
-            self.parent[ry.0] = rx.0;
+        // The lower index becomes the root, so `Variable::ZERO` is always
+        // its own root and padding rows can use it directly. No path
+        // compression: chains stay short for the way circuits get built,
+        // and `root` can then take `&self`.
+        match rx.0.cmp(&ry.0) {
+            std::cmp::Ordering::Less => self.parent[ry.0] = rx.0,
+            std::cmp::Ordering::Greater => self.parent[rx.0] = ry.0,
+            std::cmp::Ordering::Equal => {}
         }
     }
 
     /// Check every gate against the current assignment. Useful in tests; the
-    /// prover doesn't rely on it.
+    /// prover runs it before doing any real work.
     pub fn is_satisfied(&self) -> bool {
         let merged_agree = (0..self.values.len()).all(|i| {
             let v = Variable(i);

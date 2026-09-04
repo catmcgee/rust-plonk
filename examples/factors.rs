@@ -42,7 +42,7 @@ fn main() {
     let srs = match std::env::var("TRUSTED_SETUP") {
         Ok(path) => {
             let text = std::fs::read_to_string(path).expect("read trusted setup");
-            let srs = Srs::<Bls12_381>::from_ceremony_text(&text, &mut rng).expect("parse");
+            let srs = Srs::<Bls12_381>::from_ceremony_text(&text).expect("parse");
             println!("using ceremony srs, degree {}", srs.max_degree());
             srs
         }

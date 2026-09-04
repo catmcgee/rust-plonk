@@ -14,6 +14,7 @@ ark-poly = "0.5"
 ark-serialize = { version = "0.5", features = ["derive"] }
 ark-std = "0.5"
 sha2 = "0.10"
+rand = "0.8"
 rayon = { version = "1", optional = true }
 
 [features]
@@ -23,7 +24,6 @@ parallel = ["rayon", "ark-ff/parallel", "ark-ec/parallel", "ark-poly/parallel", 
 
 [dev-dependencies]
 ark-bls12-381 = "0.5"
-rand = "0.8"
 rand_chacha = "0.3"
 criterion = "0.5"
 

@@ -5,8 +5,9 @@ use plonk::{preprocess, prove, required_srs_degree, verify, Circuit, ProveError,
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
-/// A random DAG of add/mul/const gates over `inputs` allocated values, with
-/// `outputs` of the results exposed as public inputs.
+/// A random DAG over `inputs` allocated values using every helper the
+/// builder has, at least `gates` rows (a few more, since some helpers add
+/// several), with `outputs` of the results exposed as public inputs.
 fn random_circuit(
     rng: &mut ChaCha20Rng,
     gates: usize,
@@ -15,15 +16,28 @@ fn random_circuit(
 ) -> Circuit<Fr> {
     let mut c = Circuit::<Fr>::new();
     let mut vars: Vec<_> = (0..inputs).map(|_| c.alloc(Fr::rand(rng))).collect();
-    for _ in 0..gates {
+    while c.num_gates() < gates + 1 {
         let x = vars[rng.gen_range(0..vars.len())];
         let y = vars[rng.gen_range(0..vars.len())];
-        let v = match rng.gen_range(0..5) {
+        let v = match rng.gen_range(0..9) {
             0 => c.add(x, y),
             1 => c.mul(x, y),
             2 => c.sub(x, y),
             3 => c.add_const(x, Fr::rand(rng)),
-            _ => c.mul_const(x, Fr::rand(rng)),
+            4 => c.mul_const(x, Fr::rand(rng)),
+            5 => c.mul_add(x, y, vars[rng.gen_range(0..vars.len())]),
+            6 => c.constant(Fr::from(rng.gen_range(0..4u64))),
+            7 => {
+                let k = c.value(x);
+                c.assert_const(x, k);
+                c.add(x, x)
+            }
+            _ => {
+                let small = c.alloc(Fr::from(rng.gen_range(0..16u64)));
+                let bits = c.to_bits(small, 4);
+                c.assert_bool(bits[0]);
+                c.add(bits[3], small)
+            }
         };
         vars.push(v);
     }
@@ -159,7 +173,7 @@ fn key_mismatch_is_an_error() {
     assert_eq!(
         prove(&srs, &pk, &big, &mut rng).err(),
         Some(ProveError::TooManyGates {
-            max: 8,
+            max: pk.vk.n,
             got: big.num_gates()
         })
     );
@@ -171,4 +185,90 @@ fn key_mismatch_is_an_error() {
             got: 2
         })
     ));
+}
+
+#[test]
+fn srs_bound_is_tight() {
+    let mut rng = ChaCha20Rng::seed_from_u64(7);
+    for gates in [5usize, 40, 200] {
+        let c = random_circuit(&mut rng, gates, 2, 1);
+        let needed = required_srs_degree(c.num_gates());
+        let srs = Srs::<Bls12_381>::setup(needed, &mut rng);
+        let pk = preprocess(&c, &srs).unwrap();
+        let proof = prove(&srs, &pk, &c, &mut rng).unwrap();
+        assert!(verify(&pk.vk, &c.public_inputs(), &proof).is_ok());
+        let short = Srs::<Bls12_381>::setup(needed - 1, &mut rng);
+        assert!(preprocess(&c, &short).is_err());
+    }
+}
+
+#[test]
+fn merged_variables_with_different_values_do_not_prove() {
+    let mut rng = ChaCha20Rng::seed_from_u64(8);
+    let srs = Srs::<Bls12_381>::setup(required_srs_degree(16), &mut rng);
+    let mut c = Circuit::<Fr>::new();
+    let x = c.alloc(Fr::from(3u64));
+    let y = c.alloc(Fr::from(4u64));
+    let _ = c.mul(x, y);
+    c.assert_equal(x, y);
+    let pk = preprocess(&c, &srs).unwrap();
+    assert_eq!(
+        prove(&srs, &pk, &c, &mut rng).err(),
+        Some(ProveError::Unsatisfied)
+    );
+}
+
+#[test]
+fn key_from_a_different_circuit_of_the_same_shape() {
+    let mut rng = ChaCha20Rng::seed_from_u64(9);
+    let srs = Srs::<Bls12_381>::setup(required_srs_degree(64), &mut rng);
+    let a = random_circuit(&mut rng, 30, 2, 1);
+    let b = random_circuit(&mut rng, 30, 2, 1);
+    let pk_a = preprocess(&a, &srs).unwrap();
+    assert!(b.num_gates() <= pk_a.vk.n);
+    // b is satisfied on its own, but not under a's selectors and wiring
+    match prove(&srs, &pk_a, &b, &mut rng) {
+        Err(ProveError::Unsatisfied) => {}
+        Err(e) => panic!("{e}"),
+        Ok(proof) => assert!(verify(&pk_a.vk, &b.public_inputs(), &proof).is_err()),
+    }
+}
+
+#[test]
+fn quotient_chunks_are_blinded() {
+    let mut rng = ChaCha20Rng::seed_from_u64(10);
+    let srs = Srs::<Bls12_381>::setup(required_srs_degree(64), &mut rng);
+    let c = random_circuit(&mut rng, 20, 2, 1);
+    let pk = preprocess(&c, &srs).unwrap();
+    let p1 = prove(&srs, &pk, &c, &mut ChaCha20Rng::seed_from_u64(1)).unwrap();
+    let p2 = prove(&srs, &pk, &c, &mut ChaCha20Rng::seed_from_u64(2)).unwrap();
+    assert_ne!(p1.t_lo, p2.t_lo);
+    assert_ne!(p1.t_mid, p2.t_mid);
+    assert_ne!(p1.t_hi, p2.t_hi);
+    assert_ne!(p1.w_zeta, p2.w_zeta);
+    assert_ne!(p1.w_zeta_omega, p2.w_zeta_omega);
+}
+
+#[test]
+fn tampered_verifier_key_is_rejected() {
+    use plonk::VerifyError;
+    let mut rng = ChaCha20Rng::seed_from_u64(11);
+    let srs = Srs::<Bls12_381>::setup(required_srs_degree(64), &mut rng);
+    let c = random_circuit(&mut rng, 20, 2, 1);
+    let pk = preprocess(&c, &srs).unwrap();
+    let proof = prove(&srs, &pk, &c, &mut rng).unwrap();
+    let pi = c.public_inputs();
+
+    let mut vk = pk.vk.clone();
+    vk.n = 24;
+    assert_eq!(verify(&vk, &pi, &proof), Err(VerifyError::BadKey));
+    let mut vk = pk.vk.clone();
+    vk.n = 0;
+    assert_eq!(verify(&vk, &pi, &proof), Err(VerifyError::BadKey));
+    let mut vk = pk.vk.clone();
+    vk.k2 = vk.k1;
+    assert_eq!(verify(&vk, &pi, &proof), Err(VerifyError::BadKey));
+    let mut vk = pk.vk.clone();
+    vk.num_public_inputs = 1000;
+    assert!(verify(&vk, &vec![Fr::from(0u64); 1000], &proof).is_err());
 }

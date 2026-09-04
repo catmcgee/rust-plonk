@@ -194,6 +194,9 @@ fn proof_round_trips_through_bytes() {
         }
     }
     assert!(Proof::<Bls12_381>::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+    let mut longer = bytes.clone();
+    longer.push(0);
+    assert!(Proof::<Bls12_381>::from_bytes(&longer).is_err());
 
     let mut vk_bytes = Vec::new();
     pk.vk.serialize_compressed(&mut vk_bytes).unwrap();
